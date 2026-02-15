@@ -1,41 +1,76 @@
 # @warpmetrics/coder
 
-Agent pipeline for implementing GitHub issues with Claude Code. Label an issue with `agent` and it gets implemented, reviewed, and revised automatically.
+Local agent loop that watches a GitHub Projects board for tasks, implements them using Claude Code, and pushes PRs.
 
 ## Quick Start
 
 ```bash
 npx @warpmetrics/coder init
+npx @warpmetrics/coder watch
 ```
-
-This will:
-1. Set up `ANTHROPIC_API_KEY` and `WARPMETRICS_API_KEY` as GitHub secrets
-2. Add two workflow files to `.github/workflows/`
-3. Add pipeline scripts to `.github/scripts/`
-4. Register outcome classifications with WarpMetrics
 
 ## How It Works
 
 ```
-Issue labeled "agent"
-  → agent-implement.yml runs Claude Code Action
-    → Claude reads the issue, creates a branch, implements, opens PR
-      → warp-review reviews the PR (if installed)
-        → agent-revise.yml applies feedback and pushes fixes
-          → Loop until approved or revision limit (3) reached
+Board: "Todo" column
+  → warp-coder picks up the task
+    → clones repo, creates branch, runs Claude Code
+      → pushes branch, opens PR, moves to "In Review"
+        → if review feedback arrives: applies fixes, pushes again
+          → if approved: squash-merges, moves to "Done"
 ```
+
+The agent polls your GitHub Projects board and processes tasks sequentially:
+
+1. **Todo** — picks the first item, implements it, opens a PR
+2. **In Review** — detects new review comments, applies feedback (up to 3 revisions)
+3. **Approved** — squash-merges the PR, runs `onMerged` hook, moves to "Done"
 
 Every step is instrumented with [WarpMetrics](https://warpmetrics.com) — you get runs, groups, and outcomes tracking the full pipeline.
 
-## Workflows
+## Config
 
-### agent-implement.yml
+`warp-coder init` creates `.warp-coder/config.json`:
 
-Triggered when an issue is labeled `agent`. Creates a branch `agent/issue-{number}`, implements the issue, and opens a PR.
+```json
+{
+  "board": {
+    "provider": "github-projects",
+    "project": 1,
+    "owner": "your-org",
+    "columns": {
+      "todo": "Todo",
+      "inProgress": "In Progress",
+      "inReview": "In Review",
+      "done": "Done",
+      "blocked": "Blocked"
+    }
+  },
+  "hooks": {
+    "onBeforePush": "npm test",
+    "onMerged": "npm run deploy:prod"
+  },
+  "claude": {
+    "allowedTools": "Bash,Read,Edit,Write,Glob,Grep",
+    "maxTurns": 20
+  },
+  "pollInterval": 30,
+  "maxRevisions": 3,
+  "repo": "git@github.com:your-org/your-repo.git"
+}
+```
 
-### agent-revise.yml
+## Lifecycle Hooks
 
-Triggered when `github-actions[bot]` submits a review with comments (i.e., warp-review feedback). Applies the review feedback and pushes to the same branch. Stops after 3 revision attempts.
+| Hook | When | Use case |
+|------|------|----------|
+| `onBranchCreate` | After creating the implementation branch | Set up environment |
+| `onBeforePush` | Before pushing (implement or revise) | Run tests/lint |
+| `onPRCreated` | After opening a PR | Notify, add labels |
+| `onBeforeMerge` | Before squash-merging | Final checks |
+| `onMerged` | After merge completes | Deploy |
+
+Hooks receive env vars: `ISSUE_NUMBER`, `PR_NUMBER`, `BRANCH`, `REPO`.
 
 ## Outcome Classifications
 
@@ -51,13 +86,11 @@ Triggered when `github-actions[bot]` submits a review with comments (i.e., warp-
 | Revision Failed | failure |
 | Max Retries | failure |
 
-## Pairing with warp-review
+## Requirements
 
-For the full implement → review → revise loop, install [warp-review](https://github.com/warpmetrics/warp-review):
-
-```bash
-npx @warpmetrics/review init
-```
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated
+- A GitHub Projects v2 board with Status field
 
 ## License
 

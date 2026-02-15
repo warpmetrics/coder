@@ -1,11 +1,9 @@
-// Agent pipeline — shared helpers for WarpMetrics instrumentation.
+// WarpMetrics instrumentation client.
 // Zero external dependencies — uses Node built-ins + global fetch.
 
 import crypto from 'crypto';
-import { writeFileSync, readFileSync, existsSync } from 'fs';
 
 const API_URL = 'https://api.warpmetrics.com';
-const STATE_FILE = '.pipeline-state.json';
 
 // ---------------------------------------------------------------------------
 // ID generation
@@ -18,7 +16,7 @@ export function generateId(prefix) {
 }
 
 // ---------------------------------------------------------------------------
-// WarpMetrics Events API (same wire format as @warpmetrics/warp)
+// Events API (same wire format as @warpmetrics/warp)
 // ---------------------------------------------------------------------------
 
 export async function sendEvents(apiKey, batch) {
@@ -50,7 +48,7 @@ export async function sendEvents(apiKey, batch) {
 }
 
 // ---------------------------------------------------------------------------
-// WarpMetrics Query API
+// Query API
 // ---------------------------------------------------------------------------
 
 export async function findRuns(apiKey, label, { limit = 20 } = {}) {
@@ -97,14 +95,62 @@ export async function registerClassifications(apiKey) {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-step state
+// Pipeline helpers — start run/group and record outcome
 // ---------------------------------------------------------------------------
 
-export function saveState(state) {
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+export async function startPipeline(apiKey, { step, repo, issueNumber, issueTitle, prNumber }) {
+  const runId = generateId('run');
+  const groupId = generateId('grp');
+  const now = new Date().toISOString();
+
+  const opts = { repo, step };
+  if (issueNumber) opts.issue = String(issueNumber);
+  if (issueTitle) opts.title = issueTitle;
+  if (prNumber) opts.pr_number = String(prNumber);
+
+  await sendEvents(apiKey, {
+    runs: [{ id: runId, label: 'agent-pipeline', opts, refId: null, timestamp: now }],
+    groups: [{ id: groupId, label: step, opts: { triggered_at: now }, timestamp: now }],
+    links: [{ parentId: runId, childId: groupId, type: 'group', timestamp: now }],
+  });
+
+  return { runId, groupId };
 }
 
-export function loadState() {
-  if (!existsSync(STATE_FILE)) return null;
-  return JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
+export async function recordOutcome(apiKey, groupId, { step, success, costUsd, error, hooksFailed, issueNumber, prNumber, reviewCommentCount }) {
+  const names = {
+    implement: { true: 'PR Created', false: 'Implementation Failed' },
+    revise: { true: 'Fixes Applied', false: 'Revision Failed' },
+  };
+
+  const name = names[step]?.[String(success)] || `${step}: ${success ? 'success' : 'failure'}`;
+  const id = generateId('oc');
+  const now = new Date().toISOString();
+
+  const opts = { status: success ? 'success' : 'failure', step };
+  if (costUsd != null) opts.cost_usd = String(costUsd);
+  if (error) opts.error = error.slice(0, 500);
+  if (hooksFailed) opts.hooks_failed = 'true';
+  if (issueNumber) opts.issue = String(issueNumber);
+  if (prNumber) opts.pr_number = String(prNumber);
+  if (reviewCommentCount) opts.review_comments = String(reviewCommentCount);
+
+  await sendEvents(apiKey, {
+    outcomes: [{ id, refId: groupId, name, opts, timestamp: now }],
+  });
+
+  return { id, name };
+}
+
+export async function countRevisions(apiKey, { prNumber, repo }) {
+  try {
+    const runs = await findRuns(apiKey, 'agent-pipeline');
+    return runs.filter(r =>
+      r.opts?.step === 'revise' &&
+      r.opts?.pr_number === String(prNumber) &&
+      r.opts?.repo === repo
+    ).length;
+  } catch {
+    return 0;
+  }
 }

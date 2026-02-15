@@ -1,0 +1,26 @@
+{
+  "board": {
+    "provider": "github-projects",
+    "project": 1,
+    "owner": "your-org",
+    "columns": {
+      "todo": "Todo",
+      "inProgress": "In Progress",
+      "inReview": "In Review",
+      "done": "Done",
+      "blocked": "Blocked"
+    }
+  },
+  "hooks": {},
+  "claude": {
+    "allowedTools": "Bash,Read,Edit,Write,Glob,Grep",
+    "maxTurns": 20
+  },
+  "memory": {
+    "enabled": true,
+    "maxLines": 100
+  },
+  "pollInterval": 30,
+  "maxRevisions": 3,
+  "repo": "git@github.com:your-org/your-repo.git"
+}
