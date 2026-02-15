@@ -1,6 +1,6 @@
 {
   "name": "@warpmetrics/coder",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "description": "Agent pipeline for implementing GitHub issues with Claude Code. Powered by WarpMetrics.",
   "bin": {
