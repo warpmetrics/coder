@@ -49,25 +49,26 @@ if (command === 'watch') {
 // ---------------------------------------------------------------------------
 
 async function runInit() {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const ask = q => new Promise(resolve => rl.question(q, resolve));
   const log = msg => console.log(msg);
 
+  log('');
+  log('  warp-coder — set up agent config');
+  log('');
+
+  // 1. Ensure gh has the right scopes (before readline takes over stdin)
+  log('  Ensuring GitHub CLI has required scopes (project, repo)...');
   try {
-    log('');
-    log('  warp-coder — set up agent config');
-    log('');
+    execSync('gh auth refresh -s project,repo', { stdio: 'inherit' });
+    log('  \u2713 GitHub CLI scopes updated');
+  } catch {
+    log('  \u26a0 Could not refresh gh scopes — run manually: gh auth refresh -s project,repo');
+  }
+  log('');
 
-    // 1. Ensure gh has the right scopes
-    log('  Ensuring GitHub CLI has required scopes (project, repo)...');
-    try {
-      execSync('gh auth refresh -s project,repo', { stdio: 'inherit' });
-      log('  \u2713 GitHub CLI scopes updated');
-    } catch {
-      log('  \u26a0 Could not refresh gh scopes — run manually: gh auth refresh -s project,repo');
-    }
-    log('');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const ask = q => new Promise(resolve => rl.question(q, resolve));
 
+  try {
     // 2. WarpMetrics API key
     const wmKey = await ask('  ? WarpMetrics API key (get one at warpmetrics.com/app/api-keys): ');
     if (wmKey && !wmKey.startsWith('wm_')) {
