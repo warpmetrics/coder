@@ -1,0 +1,74 @@
+name: Agent — Implement Issue
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  implement:
+    if: github.event.label.name == 'agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Start pipeline
+        run: node .github/scripts/pipeline-start.js
+        env:
+          WARPMETRICS_API_KEY: ${{ secrets.WARPMETRICS_API_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STEP: implement
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+
+      - name: Implement issue
+        id: agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            You are working on the repository ${{ github.repository }}.
+
+            Implement the following GitHub issue:
+
+            **#${{ github.event.issue.number }}: ${{ github.event.issue.title }}**
+
+            ${{ github.event.issue.body }}
+
+            Steps:
+            1. Read the codebase to understand relevant context
+            2. Create a new branch: agent/issue-${{ github.event.issue.number }}
+            3. Implement the changes
+            4. Run tests to verify nothing is broken
+            5. Commit with a clear message
+            6. Push the branch and open a pull request
+            7. Include "Closes #${{ github.event.issue.number }}" in the PR body
+
+            If the issue is unclear or you cannot implement it, explain what is missing.
+
+      - name: Record outcome
+        if: always()
+        run: node .github/scripts/pipeline-outcome.js
+        env:
+          WARPMETRICS_API_KEY: ${{ secrets.WARPMETRICS_API_KEY }}
+          STEP: implement
+          STATUS: ${{ steps.agent.outcome }}
+
+      - name: Comment on failure
+        if: failure()
+        run: |
+          gh issue comment ${{ github.event.issue.number }} \
+            --body "Agent failed to implement this issue. See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          gh issue edit ${{ github.event.issue.number }} --add-label "agent-failed" --remove-label "agent"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

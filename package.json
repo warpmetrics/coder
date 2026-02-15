@@ -1,0 +1,32 @@
+{
+  "name": "@warpmetrics/coder",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Agent pipeline for implementing GitHub issues with Claude Code. Powered by WarpMetrics.",
+  "bin": {
+    "warp-coder": "./bin/init.js"
+  },
+  "scripts": {
+    "release:patch": "npm version patch && git push origin main --tags",
+    "release:minor": "npm version minor && git push origin main --tags"
+  },
+  "files": [
+    "bin/",
+    "defaults/",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/warpmetrics/warp-coder"
+  },
+  "keywords": [
+    "agent",
+    "claude-code",
+    "github-action",
+    "warpmetrics",
+    "llm",
+    "code-generation"
+  ]
+}

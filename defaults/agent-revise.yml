@@ -1,0 +1,81 @@
+name: Agent — Revise PR
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  revise:
+    # Only trigger when warp-review (bot) submits a review with comments
+    # and the PR was created by the agent (has "agent" label on the linked issue)
+    if: >
+      github.event.review.user.login == 'github-actions[bot]' &&
+      github.event.review.state == 'COMMENTED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check revision limit
+        id: check
+        run: node .github/scripts/check-revision-limit.js
+        env:
+          WARPMETRICS_API_KEY: ${{ secrets.WARPMETRICS_API_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Start pipeline
+        if: steps.check.outputs.should_revise == 'true'
+        run: node .github/scripts/pipeline-start.js
+        env:
+          WARPMETRICS_API_KEY: ${{ secrets.WARPMETRICS_API_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STEP: revise
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Apply review feedback
+        id: agent
+        if: steps.check.outputs.should_revise == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            You are working on PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            A code review has been submitted with comments. Your job:
+
+            1. Read all review comments on this PR
+            2. Apply the suggested fixes
+            3. Run tests to make sure everything passes
+            4. Commit the fixes with a message like "Address review feedback"
+            5. Push to the same branch
+
+            Do NOT open a new PR — just push to the existing branch.
+
+      - name: Record outcome
+        if: always() && steps.check.outputs.should_revise == 'true'
+        run: node .github/scripts/pipeline-outcome.js
+        env:
+          WARPMETRICS_API_KEY: ${{ secrets.WARPMETRICS_API_KEY }}
+          STEP: revise
+          STATUS: ${{ steps.agent.outcome }}
+
+      - name: Request human review
+        if: steps.check.outputs.should_revise == 'false'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "Agent has reached the revision limit (${{ steps.check.outputs.revision_count }} attempts). Requesting human review."
+          gh pr edit ${{ github.event.pull_request.number }} --add-label "needs-human"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
