@@ -17,6 +17,10 @@ export function createBranch(dir, name) {
   run(`git checkout -b ${name}`, { cwd: dir });
 }
 
+export function getHead(dir) {
+  return run(`git rev-parse HEAD`, { cwd: dir });
+}
+
 export function hasNewCommits(dir, base = 'main') {
   const log = run(`git log ${base}..HEAD --oneline`, { cwd: dir });
   return log.length > 0;
@@ -57,6 +61,10 @@ export function getReviews(prNumber, { repo }) {
 export function getReviewComments(prNumber, { repo }) {
   const out = run(`gh api repos/${repo}/pulls/${prNumber}/comments`);
   return JSON.parse(out);
+}
+
+export function dismissReview(prNumber, reviewId, { repo, message }) {
+  run(`gh api repos/${repo}/pulls/${prNumber}/reviews/${reviewId}/dismissals -X PUT -f message=${JSON.stringify(message)}`);
 }
 
 export function updatePRBody(prNumber, { repo, body }) {

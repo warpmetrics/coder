@@ -158,6 +158,8 @@ export async function revise(item, { board, config, log, refActId, since }) {
 
     const prompt = promptParts.join('\n');
 
+    const headBefore = git.getHead(workdir);
+
     log('  running claude...');
     claudeResult = await claude.run({
       prompt,
@@ -182,32 +184,61 @@ export async function revise(item, { board, config, log, refActId, since }) {
       git.commitAll(workdir, 'Address review feedback');
     }
 
-    // Push
-    log('  pushing...');
-    git.push(workdir, branch);
+    // Check if Claude actually made changes
+    const headAfter = git.getHead(workdir);
+    if (headAfter === headBefore) {
+      log('  no changes needed — review feedback already addressed');
 
-    // Update PR body with new act ID for next review cycle
-    if (actId) {
+      // Dismiss active CHANGES_REQUESTED reviews (they're stale)
       try {
-        let body = git.getPRBody(prNumber, { repo: repoName });
-        body = body.replace(/<!-- wm:act:wm_act_\w+ -->/, `<!-- wm:act:${actId} -->`);
-        if (!body.includes(`<!-- wm:act:${actId} -->`)) {
-          body += `\n\n<!-- wm:act:${actId} -->`;
+        const reviews = git.getReviews(prNumber, { repo: repoName });
+        for (const r of reviews) {
+          if (r.state === 'CHANGES_REQUESTED') {
+            git.dismissReview(prNumber, r.id, {
+              repo: repoName,
+              message: 'Code verified correct by warp-coder — no changes needed.',
+            });
+            log(`  dismissed stale review ${r.id}`);
+          }
         }
-        git.updatePRBody(prNumber, { repo: repoName, body });
       } catch (err) {
-        log(`  warning: could not update PR body with act ID: ${err.message}`);
+        log(`  warning: could not dismiss stale reviews: ${err.message}`);
       }
-    }
 
-    // Move back to In Review
-    try {
-      await board.moveToReview(item);
-    } catch (err) {
-      log(`  warning: could not move to In Review: ${err.message}`);
-    }
+      // Move back to In Review (no active CHANGES_REQUESTED, so won't be picked up again)
+      try {
+        await board.moveToReview(item);
+      } catch (err) {
+        log(`  warning: could not move to In Review: ${err.message}`);
+      }
+      success = true;
+    } else {
+      // Push
+      log('  pushing...');
+      git.push(workdir, branch);
 
-    success = true;
+      // Update PR body with new act ID for next review cycle
+      if (actId) {
+        try {
+          let body = git.getPRBody(prNumber, { repo: repoName });
+          body = body.replace(/<!-- wm:act:wm_act_\w+ -->/, `<!-- wm:act:${actId} -->`);
+          if (!body.includes(`<!-- wm:act:${actId} -->`)) {
+            body += `\n\n<!-- wm:act:${actId} -->`;
+          }
+          git.updatePRBody(prNumber, { repo: repoName, body });
+        } catch (err) {
+          log(`  warning: could not update PR body with act ID: ${err.message}`);
+        }
+      }
+
+      // Move back to In Review
+      try {
+        await board.moveToReview(item);
+      } catch (err) {
+        log(`  warning: could not move to In Review: ${err.message}`);
+      }
+      success = true;
+    }
   } catch (err) {
     taskError = err.message;
     log(`  failed: ${err.message}`);
