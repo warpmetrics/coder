@@ -1,6 +1,6 @@
 {
   "name": "@warpmetrics/coder",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "description": "Local agent loop for implementing GitHub issues with Claude Code. Powered by WarpMetrics.",
   "bin": {
