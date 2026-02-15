@@ -74,7 +74,24 @@ export async function watch() {
       for (const item of reviewItems) {
         if (!running) break;
         log(`Found review feedback: PR #${item._prNumber || item.content?.number}`);
-        await revise(item, { board, config, log, refActId: item._reviewActId });
+        const result = await revise(item, { board, config, log, refActId: item._reviewActId });
+
+        // Record outcome on the issue run if revision failed terminally
+        const issueNumber = item.content?.number;
+        const issueCtx = issueNumber ? issueRuns.get(issueNumber) : null;
+        if (!result.success && issueCtx && config.warpmetricsApiKey) {
+          const name = result.reason === 'max_retries' ? 'Max Retries' : 'Revision Failed';
+          try {
+            await warp.closeIssueRun(config.warpmetricsApiKey, {
+              runId: issueCtx.runId,
+              name,
+              opts: { pr_number: String(item._prNumber || ''), revisions: String(result.count || '') },
+            });
+            log(`  issue run: ${name}`);
+          } catch (err) {
+            log(`  warning: issue run outcome failed: ${err.message}`);
+          }
+        }
       }
 
       // 3. Merge approved PRs

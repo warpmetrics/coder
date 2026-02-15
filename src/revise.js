@@ -36,13 +36,13 @@ export async function revise(item, { board, config, log, refActId }) {
   // Check revision limit
   if (config.warpmetricsApiKey) {
     try {
-      const count = await warp.countRevisions(config.warpmetricsApiKey, { prNumber, repo: repoName });
-      if (count >= maxRevisions) {
-        log(`  revision limit reached (${count}/${maxRevisions}) — moving to Blocked`);
+      const revisionCount = await warp.countRevisions(config.warpmetricsApiKey, { prNumber, repo: repoName });
+      if (revisionCount >= maxRevisions) {
+        log(`  revision limit reached (${revisionCount}/${maxRevisions}) — moving to Blocked`);
         try { await board.moveToBlocked(item); } catch {}
-        return false;
+        return { success: false, reason: 'max_retries', count: revisionCount };
       }
-      log(`  revision ${count + 1}/${maxRevisions}`);
+      log(`  revision ${revisionCount + 1}/${maxRevisions}`);
     } catch (err) {
       log(`  warning: revision check failed: ${err.message}`);
     }
@@ -268,5 +268,5 @@ export async function revise(item, { board, config, log, refActId }) {
     rmSync(workdir, { recursive: true, force: true });
   }
 
-  return success;
+  return { success, reason: success ? 'ok' : 'error' };
 }
