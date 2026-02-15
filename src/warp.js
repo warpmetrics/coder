@@ -186,6 +186,27 @@ export async function emitAct(apiKey, { outcomeId, actId, name, opts }) {
   });
 }
 
+export async function findIssueRun(apiKey, { repo, issueNumber }) {
+  const runs = await findRuns(apiKey, 'issue');
+  const match = runs.find(r =>
+    r.opts?.repo === repo &&
+    r.opts?.issue === String(issueNumber)
+  );
+  if (!match) return null;
+
+  const res = await fetch(`${API_URL}/v1/runs/${match.id}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) return null;
+  const { data } = await res.json();
+
+  const outcomes = data.outcomes || [];
+  const lastOutcome = outcomes[outcomes.length - 1];
+  const blockedAt = lastOutcome?.name === 'Max Retries' ? lastOutcome.timestamp : null;
+
+  return { runId: match.id, blockedAt };
+}
+
 export async function countRevisions(apiKey, { prNumber, repo, since }) {
   try {
     const runs = await findRuns(apiKey, 'agent-pipeline');

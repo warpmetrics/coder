@@ -74,8 +74,22 @@ export async function watch() {
       for (const item of reviewItems) {
         if (!running) break;
         const issueNumber = item.content?.number;
-        const issueCtx = issueNumber ? issueRuns.get(issueNumber) : null;
+        let issueCtx = issueNumber ? issueRuns.get(issueNumber) : null;
         log(`Found review feedback: PR #${item._prNumber || item.content?.number}`);
+
+        // Recover issue run from WM if watcher was restarted
+        if (!issueCtx && issueNumber && config.warpmetricsApiKey) {
+          try {
+            const recovered = await warp.findIssueRun(config.warpmetricsApiKey, { repo: repoName, issueNumber });
+            if (recovered) {
+              issueRuns.set(issueNumber, recovered);
+              issueCtx = recovered;
+              log(`  recovered issue run: ${recovered.runId}`);
+            }
+          } catch (err) {
+            log(`  warning: could not recover issue run: ${err.message}`);
+          }
+        }
 
         // Detect resume: item was previously blocked, human moved it back to In Review
         let since = null;
