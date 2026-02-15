@@ -56,12 +56,23 @@ async function runInit() {
   log('');
 
   // 1. Ensure gh has the right scopes (before readline takes over stdin)
-  log('  Ensuring GitHub CLI has required scopes (project, repo)...');
+  log('  Checking GitHub CLI scopes...');
   try {
-    execSync('gh auth refresh -s project,repo', { stdio: 'inherit' });
-    log('  \u2713 GitHub CLI scopes updated');
+    const authStatus = execSync('gh auth status', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).toLowerCase();
+    const hasScopes = authStatus.includes('project') && authStatus.includes('repo');
+    if (hasScopes) {
+      log('  \u2713 GitHub CLI scopes OK');
+    } else {
+      throw new Error('missing scopes');
+    }
   } catch {
-    log('  \u26a0 Could not refresh gh scopes — run manually: gh auth refresh -s project,repo');
+    log('  Requesting required scopes (project, repo)...');
+    try {
+      execSync('gh auth refresh -s project,repo', { stdio: 'inherit' });
+      log('  \u2713 GitHub CLI scopes updated');
+    } catch {
+      log('  \u26a0 Could not refresh gh scopes — run manually: gh auth refresh -s project,repo');
+    }
   }
   log('');
 
