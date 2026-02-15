@@ -65,6 +65,7 @@ export async function reflect({ configDir, step, issue, prNumber, success, error
       workdir: process.cwd(),
       allowedTools: '',
       maxTurns: 1,
+      verbose: false,
     });
 
     const content = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);

@@ -58,14 +58,24 @@ async function runInit() {
     log('  warp-coder — set up agent config');
     log('');
 
-    // 1. WarpMetrics API key
+    // 1. Ensure gh has the right scopes
+    log('  Ensuring GitHub CLI has required scopes (project, repo)...');
+    try {
+      execSync('gh auth refresh -s project,repo', { stdio: 'inherit' });
+      log('  \u2713 GitHub CLI scopes updated');
+    } catch {
+      log('  \u26a0 Could not refresh gh scopes — run manually: gh auth refresh -s project,repo');
+    }
+    log('');
+
+    // 2. WarpMetrics API key
     const wmKey = await ask('  ? WarpMetrics API key (get one at warpmetrics.com/app/api-keys): ');
     if (wmKey && !wmKey.startsWith('wm_')) {
       log('  \u26a0 Warning: key doesn\'t start with wm_ — make sure this is a valid WarpMetrics API key');
     }
     log('');
 
-    // 2. Repo URL
+    // 3. Repo URL
     let repoDefault = '';
     try {
       repoDefault = execSync('git remote get-url origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
@@ -79,7 +89,7 @@ async function runInit() {
     }
     log('');
 
-    // 3. Board provider
+    // 4. Board provider
     log('  Board: GitHub Projects v2');
     const projectNumber = await ask('  ? Project number: ');
     if (!projectNumber) {
@@ -96,7 +106,7 @@ async function runInit() {
     const owner = ownerInput || ownerDefault;
     log('');
 
-    // 4. Discover field IDs and column names
+    // 5. Discover field IDs and column names
     let columns = { todo: 'Todo', inProgress: 'In Progress', inReview: 'In Review', done: 'Done', blocked: 'Blocked' };
     try {
       log('  Discovering project fields...');
@@ -119,7 +129,7 @@ async function runInit() {
       log('');
     }
 
-    // 5. Build config
+    // 6. Build config
     const config = {
       board: {
         provider: 'github-projects',
@@ -141,13 +151,29 @@ async function runInit() {
       config.warpmetricsApiKey = wmKey;
     }
 
-    // 6. Write config
+    // 7. Write config
     const configDir = '.warp-coder';
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n');
     log(`  \u2713 ${configDir}/config.json created`);
 
-    // 7. Register outcome classifications
+    // 8. Add to .gitignore
+    const gitignorePath = '.gitignore';
+    const entry = '.warp-coder/';
+    if (existsSync(gitignorePath)) {
+      const content = readFileSync(gitignorePath, 'utf-8');
+      if (!content.split('\n').some(line => line.trim() === entry)) {
+        writeFileSync(gitignorePath, content.trimEnd() + '\n' + entry + '\n');
+        log(`  \u2713 Added ${entry} to .gitignore`);
+      } else {
+        log(`  \u2713 ${entry} already in .gitignore`);
+      }
+    } else {
+      writeFileSync(gitignorePath, entry + '\n');
+      log(`  \u2713 Created .gitignore with ${entry}`);
+    }
+
+    // 9. Register outcome classifications
     if (wmKey) {
       log('  Registering outcome classifications with WarpMetrics...');
       try {
@@ -159,13 +185,12 @@ async function runInit() {
       }
     }
 
-    // 8. Next steps
+    // 10. Next steps
     log('');
     log('  Done! Next steps:');
-    log('  1. Add .warp-coder/config.json to .gitignore (contains API key)');
-    log('  2. Run: warp-coder watch');
-    log('  3. Add issues to the "Todo" column of your project board');
-    log('  4. View pipeline analytics at https://app.warpmetrics.com');
+    log('  1. Run: warp-coder watch');
+    log('  2. Add issues to the "Ready" column of your project board');
+    log('  3. View pipeline analytics at https://app.warpmetrics.com');
     log('');
   } finally {
     rl.close();

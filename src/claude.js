@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 
-export function run({ prompt, workdir, allowedTools = 'Bash,Read,Edit,Write,Glob,Grep', maxTurns }) {
+export function run({ prompt, workdir, allowedTools = 'Bash,Read,Edit,Write,Glob,Grep', maxTurns, verbose = true }) {
   return new Promise((resolve, reject) => {
     const args = ['-p', prompt, '--output-format', 'json', '--allowedTools', allowedTools];
     if (maxTurns) args.push('--max-turns', String(maxTurns));
@@ -13,7 +13,10 @@ export function run({ prompt, workdir, allowedTools = 'Bash,Read,Edit,Write,Glob
     let stdout = '';
     let stderr = '';
     proc.stdout.on('data', d => { stdout += d; });
-    proc.stderr.on('data', d => { stderr += d; });
+    proc.stderr.on('data', d => {
+      stderr += d;
+      if (verbose) process.stderr.write(d);
+    });
 
     proc.on('close', code => {
       if (code !== 0) {
