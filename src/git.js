@@ -59,6 +59,14 @@ export function getReviewComments(prNumber, { repo }) {
   return JSON.parse(out);
 }
 
+export function updatePRBody(prNumber, { repo, body }) {
+  run(`gh pr edit ${prNumber} --repo ${repo} --body ${JSON.stringify(body)}`);
+}
+
+export function getPRBody(prNumber, { repo }) {
+  return run(`gh pr view ${prNumber} --repo ${repo} --json body --jq .body`);
+}
+
 export function getPRBranch(prNumber, { repo }) {
   const out = run(`gh pr view ${prNumber} --repo ${repo} --json headRefName --jq .headRefName`);
   return out;

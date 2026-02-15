@@ -69,6 +69,8 @@ export async function registerClassifications(apiKey) {
   const items = [
     { name: 'PR Created', classification: 'success' },
     { name: 'Fixes Applied', classification: 'success' },
+    { name: 'Merged', classification: 'success' },
+    { name: 'Shipped', classification: 'success' },
     { name: 'Issue Understood', classification: 'success' },
     { name: 'Needs Clarification', classification: 'neutral' },
     { name: 'Needs Human', classification: 'neutral' },
@@ -95,10 +97,36 @@ export async function registerClassifications(apiKey) {
 }
 
 // ---------------------------------------------------------------------------
+// Issue run — the root of the lifecycle chain
+// ---------------------------------------------------------------------------
+
+export async function createIssueRun(apiKey, { repo, issueNumber, issueTitle }) {
+  const runId = generateId('run');
+  const outcomeId = generateId('oc');
+  const actId = generateId('act');
+  const now = new Date().toISOString();
+
+  await sendEvents(apiKey, {
+    runs: [{ id: runId, label: 'issue', opts: { repo, issue: String(issueNumber), title: issueTitle }, refId: null, timestamp: now }],
+    outcomes: [{ id: outcomeId, refId: runId, name: 'Started', opts: null, timestamp: now }],
+    acts: [{ id: actId, refId: outcomeId, name: 'implement', opts: null, timestamp: now }],
+  });
+
+  return { runId, actId };
+}
+
+export async function closeIssueRun(apiKey, { runId, name, opts }) {
+  const now = new Date().toISOString();
+  await sendEvents(apiKey, {
+    outcomes: [{ id: generateId('oc'), refId: runId, name, opts: opts || null, timestamp: now }],
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline helpers — start run/group and record outcome
 // ---------------------------------------------------------------------------
 
-export async function startPipeline(apiKey, { step, repo, issueNumber, issueTitle, prNumber }) {
+export async function startPipeline(apiKey, { step, repo, issueNumber, issueTitle, prNumber, refActId }) {
   const runId = generateId('run');
   const groupId = generateId('grp');
   const now = new Date().toISOString();
@@ -109,7 +137,7 @@ export async function startPipeline(apiKey, { step, repo, issueNumber, issueTitl
   if (prNumber) opts.pr_number = String(prNumber);
 
   await sendEvents(apiKey, {
-    runs: [{ id: runId, label: 'agent-pipeline', opts, refId: null, timestamp: now }],
+    runs: [{ id: runId, label: 'agent-pipeline', opts, refId: refActId || null, timestamp: now }],
     groups: [{ id: groupId, label: step, opts: { triggered_at: now }, timestamp: now }],
     links: [{ parentId: runId, childId: groupId, type: 'group', timestamp: now }],
   });
@@ -121,6 +149,7 @@ export async function recordOutcome(apiKey, { runId, groupId }, { step, success,
   const names = {
     implement: { true: 'PR Created', false: 'Implementation Failed' },
     revise: { true: 'Fixes Applied', false: 'Revision Failed' },
+    merge: { true: 'Merged', false: 'Merge Failed' },
   };
 
   const name = names[step]?.[String(success)] || `${step}: ${success ? 'success' : 'failure'}`;
@@ -134,16 +163,20 @@ export async function recordOutcome(apiKey, { runId, groupId }, { step, success,
   if (prNumber) opts.pr_number = String(prNumber);
   if (reviewCommentCount) opts.review_comments = String(reviewCommentCount);
 
+  const groupOutcomeId = generateId('oc');
   const outcomes = [
-    { id: generateId('oc'), refId: groupId, name, opts, timestamp: now },
+    { id: groupOutcomeId, refId: groupId, name, opts, timestamp: now },
   ];
+
+  let runOutcomeId = null;
   if (runId) {
-    outcomes.push({ id: generateId('oc'), refId: runId, name, opts, timestamp: now });
+    runOutcomeId = generateId('oc');
+    outcomes.push({ id: runOutcomeId, refId: runId, name, opts, timestamp: now });
   }
 
   await sendEvents(apiKey, { outcomes });
 
-  return { id: outcomes[0].id, name };
+  return { id: groupOutcomeId, runOutcomeId, name };
 }
 
 export async function emitAct(apiKey, { outcomeId, actId, name, opts }) {

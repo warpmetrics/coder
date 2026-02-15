@@ -111,6 +111,14 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
         const repo = item.content.repository || `${owner}/${item.content.repository}`;
         const reviews = ghJson(`api repos/${repo}/pulls/${prNumber}/reviews`);
         item._prNumber = prNumber;
+
+        // Parse act ID from the most recent warp-review review body
+        const actMatch = reviews
+          ?.slice().reverse()
+          .map(r => (r.body || '').match(/<!-- wm:act:(wm_act_\w+) -->/))
+          .find(m => m);
+        if (actMatch) item._reviewActId = actMatch[1];
+
         if (reviews?.some(r => r.state === 'APPROVED')) {
           approved.push(item);
         } else if (reviews?.some(r => r.state === 'COMMENTED' || r.state === 'CHANGES_REQUESTED')) {

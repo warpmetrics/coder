@@ -12,7 +12,7 @@ import { reflect } from './reflect.js';
 
 const CONFIG_DIR = '.warp-coder';
 
-export async function implement(item, { board, config, log }) {
+export async function implement(item, { board, config, log, refActId }) {
   const issueNumber = item.content?.number;
   const issueTitle = item.content?.title || `Issue #${issueNumber}`;
   const issueBody = item.content?.body || '';
@@ -45,6 +45,7 @@ export async function implement(item, { board, config, log }) {
         repo: repoName,
         issueNumber,
         issueTitle,
+        refActId,
       });
       runId = pipeline.runId;
       groupId = pipeline.groupId;
@@ -203,9 +204,9 @@ export async function implement(item, { board, config, log }) {
         log(`  outcome: ${outcome.name}`);
 
         // Emit act so warp-review can link its run as a follow-up
-        if (success && actId) {
+        if (success && actId && outcome.runOutcomeId) {
           await warp.emitAct(config.warpmetricsApiKey, {
-            outcomeId: outcome.id,
+            outcomeId: outcome.runOutcomeId,
             actId,
             name: 'review',
           });

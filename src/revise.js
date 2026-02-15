@@ -12,13 +12,16 @@ import { reflect } from './reflect.js';
 
 const CONFIG_DIR = '.warp-coder';
 
-export async function revise(item, { board, config, log }) {
+export async function revise(item, { board, config, log, refActId }) {
   const prNumber = item._prNumber || item.content?.number;
   const repo = config.repo;
   const repoName = repo.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');
   const maxRevisions = config.maxRevisions || 3;
   const workdir = join(tmpdir(), 'warp-coder', `revise-${prNumber}`);
   const configDir = join(process.cwd(), CONFIG_DIR);
+
+  // Pre-generate act ID for chaining (update PR body so warp-review can link next review)
+  const actId = config.warpmetricsApiKey ? warp.generateId('act') : null;
 
   log(`Revising PR #${prNumber}`);
 
@@ -54,6 +57,7 @@ export async function revise(item, { board, config, log }) {
         step: 'revise',
         repo: repoName,
         prNumber,
+        refActId,
       });
       runId = pipeline.runId;
       groupId = pipeline.groupId;
@@ -182,6 +186,20 @@ export async function revise(item, { board, config, log }) {
     log('  pushing...');
     git.push(workdir, branch);
 
+    // Update PR body with new act ID for next review cycle
+    if (actId) {
+      try {
+        let body = git.getPRBody(prNumber, { repo: repoName });
+        body = body.replace(/<!-- wm:act:wm_act_\w+ -->/, `<!-- wm:act:${actId} -->`);
+        if (!body.includes(`<!-- wm:act:${actId} -->`)) {
+          body += `\n\n<!-- wm:act:${actId} -->`;
+        }
+        git.updatePRBody(prNumber, { repo: repoName, body });
+      } catch (err) {
+        log(`  warning: could not update PR body with act ID: ${err.message}`);
+      }
+    }
+
     // Move back to In Review
     try {
       await board.moveToReview(item);
@@ -212,6 +230,15 @@ export async function revise(item, { board, config, log }) {
           reviewCommentCount: reviewComments.length,
         });
         log(`  outcome: ${outcome.name}`);
+
+        // Emit act so warp-review can link its next review as a follow-up
+        if (success && actId && outcome.runOutcomeId) {
+          await warp.emitAct(config.warpmetricsApiKey, {
+            outcomeId: outcome.runOutcomeId,
+            actId,
+            name: 'review',
+          });
+        }
       } catch (err) {
         log(`  warning: outcome recording failed: ${err.message}`);
       }
