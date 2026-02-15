@@ -204,7 +204,7 @@ export async function findIssueRun(apiKey, { repo, issueNumber }) {
   const lastOutcome = outcomes[outcomes.length - 1];
   const blockedAt = lastOutcome?.name === 'Max Retries' ? lastOutcome.timestamp : null;
 
-  return { runId: match.id, blockedAt };
+  return { runId: match.id, blockedAt, countSince: null };
 }
 
 export async function countRevisions(apiKey, { prNumber, repo, since }) {

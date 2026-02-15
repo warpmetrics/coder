@@ -58,7 +58,7 @@ export async function watch() {
             const issue = await warp.createIssueRun(config.warpmetricsApiKey, {
               repo: repoName, issueNumber, issueTitle,
             });
-            issueRuns.set(issueNumber, { runId: issue.runId, blockedAt: null });
+            issueRuns.set(issueNumber, { runId: issue.runId, blockedAt: null, countSince: null });
             implementActId = issue.actId;
             log(`  issue run: ${issue.runId}`);
           } catch (err) {
@@ -92,11 +92,10 @@ export async function watch() {
         }
 
         // Detect resume: item was previously blocked, human moved it back to In Review
-        let since = null;
         if (issueCtx?.blockedAt) {
-          since = issueCtx.blockedAt;
+          issueCtx.countSince = issueCtx.blockedAt;
           issueCtx.blockedAt = null;
-          log(`  resumed (counter reset)`);
+          log(`  resumed from blocked (counter reset, since: ${issueCtx.countSince})`);
           if (config.warpmetricsApiKey) {
             try {
               await warp.closeIssueRun(config.warpmetricsApiKey, {
@@ -106,12 +105,13 @@ export async function watch() {
           }
         }
 
-        const result = await revise(item, { board, config, log, refActId: item._reviewActId, since });
+        const result = await revise(item, { board, config, log, refActId: item._reviewActId, since: issueCtx?.countSince });
 
         // Record outcome on the issue run if revision failed terminally
         if (!result.success && issueCtx && config.warpmetricsApiKey) {
           const name = result.reason === 'max_retries' ? 'Max Retries' : 'Revision Failed';
           issueCtx.blockedAt = new Date().toISOString();
+          issueCtx.countSince = null;
           try {
             await warp.closeIssueRun(config.warpmetricsApiKey, {
               runId: issueCtx.runId,
