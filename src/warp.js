@@ -186,13 +186,14 @@ export async function emitAct(apiKey, { outcomeId, actId, name, opts }) {
   });
 }
 
-export async function countRevisions(apiKey, { prNumber, repo }) {
+export async function countRevisions(apiKey, { prNumber, repo, since }) {
   try {
     const runs = await findRuns(apiKey, 'agent-pipeline');
     return runs.filter(r =>
       r.opts?.step === 'revise' &&
       r.opts?.pr_number === String(prNumber) &&
-      r.opts?.repo === repo
+      r.opts?.repo === repo &&
+      (!since || new Date(r.createdAt) >= new Date(since))
     ).length;
   } catch {
     return 0;

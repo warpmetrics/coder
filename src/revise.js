@@ -12,7 +12,7 @@ import { reflect } from './reflect.js';
 
 const CONFIG_DIR = '.warp-coder';
 
-export async function revise(item, { board, config, log, refActId }) {
+export async function revise(item, { board, config, log, refActId, since }) {
   const prNumber = item._prNumber || item.content?.number;
   const repo = config.repo;
   const repoName = repo.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');
@@ -36,7 +36,7 @@ export async function revise(item, { board, config, log, refActId }) {
   // Check revision limit
   if (config.warpmetricsApiKey) {
     try {
-      const revisionCount = await warp.countRevisions(config.warpmetricsApiKey, { prNumber, repo: repoName });
+      const revisionCount = await warp.countRevisions(config.warpmetricsApiKey, { prNumber, repo: repoName, since });
       if (revisionCount >= maxRevisions) {
         log(`  revision limit reached (${revisionCount}/${maxRevisions}) — moving to Blocked`);
         try { await board.moveToBlocked(item); } catch {}

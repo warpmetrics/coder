@@ -58,7 +58,7 @@ export async function watch() {
             const issue = await warp.createIssueRun(config.warpmetricsApiKey, {
               repo: repoName, issueNumber, issueTitle,
             });
-            issueRuns.set(issueNumber, { runId: issue.runId });
+            issueRuns.set(issueNumber, { runId: issue.runId, blockedAt: null });
             implementActId = issue.actId;
             log(`  issue run: ${issue.runId}`);
           } catch (err) {
@@ -73,14 +73,31 @@ export async function watch() {
       const reviewItems = await board.listInReview();
       for (const item of reviewItems) {
         if (!running) break;
-        log(`Found review feedback: PR #${item._prNumber || item.content?.number}`);
-        const result = await revise(item, { board, config, log, refActId: item._reviewActId });
-
-        // Record outcome on the issue run if revision failed terminally
         const issueNumber = item.content?.number;
         const issueCtx = issueNumber ? issueRuns.get(issueNumber) : null;
+        log(`Found review feedback: PR #${item._prNumber || item.content?.number}`);
+
+        // Detect resume: item was previously blocked, human moved it back to In Review
+        let since = null;
+        if (issueCtx?.blockedAt) {
+          since = issueCtx.blockedAt;
+          issueCtx.blockedAt = null;
+          log(`  resumed (counter reset)`);
+          if (config.warpmetricsApiKey) {
+            try {
+              await warp.closeIssueRun(config.warpmetricsApiKey, {
+                runId: issueCtx.runId, name: 'Resumed',
+              });
+            } catch {}
+          }
+        }
+
+        const result = await revise(item, { board, config, log, refActId: item._reviewActId, since });
+
+        // Record outcome on the issue run if revision failed terminally
         if (!result.success && issueCtx && config.warpmetricsApiKey) {
           const name = result.reason === 'max_retries' ? 'Max Retries' : 'Revision Failed';
+          issueCtx.blockedAt = new Date().toISOString();
           try {
             await warp.closeIssueRun(config.warpmetricsApiKey, {
               runId: issueCtx.runId,
