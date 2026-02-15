@@ -56,23 +56,28 @@ async function runInit() {
   log('');
 
   // 1. Ensure gh has the right scopes (before readline takes over stdin)
+  // Need 'project' (read:project is not enough) and 'repo'
   log('  Checking GitHub CLI scopes...');
   try {
-    const authStatus = execSync('gh auth status', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).toLowerCase();
-    const hasScopes = authStatus.includes('project') && authStatus.includes('repo');
-    if (hasScopes) {
+    let authOutput = '';
+    try {
+      authOutput = execSync('gh auth status 2>&1', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (err) {
+      authOutput = err.stdout || err.stderr || '';
+    }
+    const scopesMatch = authOutput.match(/Token scopes:\s*(.+)/i);
+    const scopeList = (scopesMatch?.[1]?.match(/'([^']+)'/g) || []).map(s => s.replace(/'/g, ''));
+    const missing = ['project', 'repo'].filter(s => !scopeList.includes(s));
+
+    if (missing.length === 0) {
       log('  \u2713 GitHub CLI scopes OK');
     } else {
-      throw new Error('missing scopes');
+      log(`  Missing scopes: ${missing.join(', ')}`);
+      execSync(`gh auth refresh -s ${missing.join(',')}`, { stdio: 'inherit' });
+      log('  \u2713 GitHub CLI scopes updated');
     }
   } catch {
-    log('  Requesting required scopes (project, repo)...');
-    try {
-      execSync('gh auth refresh -s project,repo', { stdio: 'inherit' });
-      log('  \u2713 GitHub CLI scopes updated');
-    } catch {
-      log('  \u26a0 Could not refresh gh scopes — run manually: gh auth refresh -s project,repo');
-    }
+    log('  \u26a0 Could not verify gh scopes — run manually: gh auth refresh -s project,repo');
   }
   log('');
 

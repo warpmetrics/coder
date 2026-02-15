@@ -17,7 +17,7 @@ export async function implement(item, { board, config, log }) {
   const issueTitle = item.content?.title || `Issue #${issueNumber}`;
   const issueBody = item.content?.body || '';
   const repo = config.repo;
-  const repoName = repo.replace(/\.git$/, '').split('/').pop(); // owner/repo or just repo
+  const repoName = repo.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');
   const branch = `agent/issue-${issueNumber}`;
   const workdir = join(tmpdir(), 'warp-coder', String(issueNumber));
   const configDir = join(process.cwd(), CONFIG_DIR);
@@ -27,11 +27,16 @@ export async function implement(item, { board, config, log }) {
   // Move to In Progress
   try {
     await board.moveToInProgress(item);
+    log('  moved to In Progress');
   } catch (err) {
     log(`  warning: could not move to In Progress: ${err.message}`);
   }
 
+  // Pre-generate act ID for chaining (embedded in PR body so warp-review can link back)
+  const actId = config.warpmetricsApiKey ? warp.generateId('act') : null;
+
   // WarpMetrics: start pipeline
+  let runId = null;
   let groupId = null;
   if (config.warpmetricsApiKey) {
     try {
@@ -41,8 +46,9 @@ export async function implement(item, { board, config, log }) {
         issueNumber,
         issueTitle,
       });
+      runId = pipeline.runId;
       groupId = pipeline.groupId;
-      log(`  pipeline: run=${pipeline.runId} group=${groupId}`);
+      log(`  pipeline: run=${runId} group=${groupId}`);
     } catch (err) {
       log(`  warning: pipeline start failed: ${err.message}`);
     }
@@ -102,7 +108,7 @@ export async function implement(item, { board, config, log }) {
       '1. Read the codebase to understand relevant context',
       '2. Implement the changes',
       '3. Run tests to verify nothing is broken',
-      '4. Commit with a clear message',
+      '4. Commit all changes with a clear message — this is critical, do not skip the commit',
       '',
       'Do NOT create branches, push, or open PRs — just implement and commit.',
       'If the issue is unclear or you cannot implement it, explain what is missing.',
@@ -118,6 +124,8 @@ export async function implement(item, { board, config, log }) {
       maxTurns: config.claude?.maxTurns,
     });
     log(`  claude done (cost: $${claudeResult.costUsd ?? '?'})`);
+    log(`  git status: ${git.status(workdir) || '(clean)'}`);
+    log(`  git log: ${git.hasNewCommits(workdir) ? 'has new commits' : 'NO new commits'}`);
 
     // Hook: onBeforePush
     try {
@@ -128,12 +136,29 @@ export async function implement(item, { board, config, log }) {
       throw err;
     }
 
+    // Auto-commit if Claude left uncommitted changes
+    if (!git.hasNewCommits(workdir) && git.status(workdir)) {
+      log('  claude forgot to commit — auto-committing');
+      git.commitAll(workdir, `Implement #${issueNumber}: ${issueTitle}`);
+    }
+
+    if (!git.hasNewCommits(workdir)) {
+      throw new Error('Claude did not produce any changes.');
+    }
+
     // Push + PR
     log('  pushing...');
     git.push(workdir, branch);
+    const prBody = [
+      `Closes #${issueNumber}`,
+      '',
+      'Implemented by warp-coder.',
+      ...(actId ? ['', `<!-- wm:act:${actId} -->`] : []),
+    ].join('\n');
     const pr = git.createPR(workdir, {
       title: issueTitle,
-      body: `Closes #${issueNumber}\n\nImplemented by warp-coder.`,
+      body: prBody,
+      head: branch,
     });
     log(`  PR created: ${pr.url}`);
 
@@ -149,6 +174,7 @@ export async function implement(item, { board, config, log }) {
     // Move to In Review
     try {
       await board.moveToReview(item);
+      log('  moved to In Review');
     } catch (err) {
       log(`  warning: could not move to In Review: ${err.message}`);
     }
@@ -157,11 +183,16 @@ export async function implement(item, { board, config, log }) {
   } catch (err) {
     taskError = err.message;
     log(`  failed: ${err.message}`);
+    try {
+      await board.moveToBlocked(item);
+    } catch (moveErr) {
+      log(`  warning: could not move to Blocked: ${moveErr.message}`);
+    }
   } finally {
     // WarpMetrics: record outcome
     if (config.warpmetricsApiKey && groupId) {
       try {
-        const outcome = await warp.recordOutcome(config.warpmetricsApiKey, groupId, {
+        const outcome = await warp.recordOutcome(config.warpmetricsApiKey, { runId, groupId }, {
           step: 'implement',
           success,
           costUsd: claudeResult?.costUsd,
@@ -170,6 +201,15 @@ export async function implement(item, { board, config, log }) {
           issueNumber,
         });
         log(`  outcome: ${outcome.name}`);
+
+        // Emit act so warp-review can link its run as a follow-up
+        if (success && actId) {
+          await warp.emitAct(config.warpmetricsApiKey, {
+            outcomeId: outcome.id,
+            actId,
+            name: 'review',
+          });
+        }
       } catch (err) {
         log(`  warning: outcome recording failed: ${err.message}`);
       }

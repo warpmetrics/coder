@@ -21,12 +21,52 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
     blocked: columns.blocked || 'Blocked',
   };
 
-  // Cache field/option IDs (discovered on first use)
+  // PR lookup cache (issue number → PR number or null). Persists across polls.
+  const prCache = new Map();
+
+  // Find the PR linked to an issue item (via "Closes #N" convention)
+  function findLinkedPR(item) {
+    // If the item is already a PR, use its number directly
+    if (item.content?.type === 'PullRequest') return item.content.number;
+    // Otherwise look for a linked PR via the branch naming convention
+    const issueNumber = item.content?.number;
+    if (!issueNumber) return null;
+    if (prCache.has(issueNumber)) return prCache.get(issueNumber);
+    let result = null;
+    try {
+      const repo = item.content.repository || `${owner}/${item.content.repository}`;
+      // Search for PRs that reference this issue
+      const prs = ghJson(`api repos/${repo}/pulls?state=open&head=agent/issue-${issueNumber} --jq '.[0].number'`);
+      if (prs && typeof prs === 'number') result = prs;
+    } catch {}
+    if (!result) {
+      try {
+        // Fallback: search via gh pr list
+        const repo = item.content.repository;
+        const out = gh(`pr list --repo ${repo} --search "Closes #${issueNumber}" --json number --jq '.[0].number'`);
+        if (out) result = parseInt(out, 10);
+      } catch {}
+    }
+    prCache.set(issueNumber, result);
+    return result;
+  }
+
+  // Cache field/option IDs and project node ID (discovered on first use)
+  let projectNodeId = null;
   let fieldId = null;
   let optionIds = null;
 
+  function discoverProject() {
+    if (projectNodeId) return;
+    const projects = ghJson(`project list --owner ${owner} --format json`);
+    const proj = projects?.projects?.find(p => p.number === project);
+    if (!proj) throw new Error(`Project #${project} not found for owner ${owner}`);
+    projectNodeId = proj.id;
+  }
+
   function discoverField() {
     if (fieldId) return;
+    discoverProject();
     const fields = ghJson(`project field-list ${project} --owner ${owner} --format json`);
     const field = fields?.fields?.find(f => f.name === statusField);
     if (!field) throw new Error(`Status field "${statusField}" not found in project ${project}`);
@@ -45,56 +85,67 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
     return id;
   }
 
-  async function listItemsByStatus(statusName) {
-    const items = ghJson(`project item-list ${project} --owner ${owner} --format json`);
-    return (items?.items || []).filter(item => {
+  // Cached item list — refreshed once per poll cycle via refresh()
+  let cachedItems = null;
+  let cachedReviewClassification = null;
+
+  function getItemsByStatus(statusName) {
+    return (cachedItems?.items || []).filter(item => {
       const status = item.status || item.fields?.find(f => f.name === statusField)?.value;
       return status === statusName;
     });
   }
 
+  // Classify "In Review" items in a single pass — one review API call per item.
+  // Result is cached per poll cycle so listInReview + listApproved share one pass.
+  function classifyInReview() {
+    if (cachedReviewClassification) return cachedReviewClassification;
+    const items = getItemsByStatus(colNames.inReview);
+    const needsRevision = [];
+    const approved = [];
+    for (const item of items) {
+      if (!item.content?.number) continue;
+      try {
+        const prNumber = findLinkedPR(item);
+        if (!prNumber) continue;
+        const repo = item.content.repository || `${owner}/${item.content.repository}`;
+        const reviews = ghJson(`api repos/${repo}/pulls/${prNumber}/reviews`);
+        item._prNumber = prNumber;
+        if (reviews?.some(r => r.state === 'APPROVED')) {
+          approved.push(item);
+        } else if (reviews?.some(r => r.state === 'COMMENTED' || r.state === 'CHANGES_REQUESTED')) {
+          needsRevision.push(item);
+        }
+      } catch {
+        // Skip items we can't check
+      }
+    }
+    cachedReviewClassification = { needsRevision, approved };
+    return cachedReviewClassification;
+  }
+
   async function moveItem(item, colKey) {
     discoverField();
     const optId = getOptionId(colKey);
-    gh(`project item-edit --id ${item.id} --project-id ${item.projectId || project} --field-id ${fieldId} --single-select-option-id ${optId}`);
+    gh(`project item-edit --id ${item.id} --project-id ${projectNodeId} --field-id ${fieldId} --single-select-option-id ${optId}`);
   }
 
   return {
+    refresh() {
+      cachedItems = ghJson(`project item-list ${project} --owner ${owner} --format json`);
+      cachedReviewClassification = null;
+    },
+
     async listTodo() {
-      return listItemsByStatus(colNames.todo);
+      return getItemsByStatus(colNames.todo);
     },
 
     async listInReview() {
-      const items = await listItemsByStatus(colNames.inReview);
-      // Filter to items that have new reviews
-      const withReviews = [];
-      for (const item of items) {
-        if (!item.content?.number) continue;
-        try {
-          const reviews = ghJson(`api repos/${owner}/${item.content.repository}/pulls/${item.content.number}/reviews`);
-          const hasNew = reviews?.some(r => r.state === 'COMMENTED' || r.state === 'CHANGES_REQUESTED');
-          if (hasNew) withReviews.push(item);
-        } catch {
-          // Skip items we can't check
-        }
-      }
-      return withReviews;
+      return classifyInReview().needsRevision;
     },
 
     async listApproved() {
-      const items = await listItemsByStatus(colNames.inReview);
-      const approved = [];
-      for (const item of items) {
-        if (!item.content?.number) continue;
-        try {
-          const reviews = ghJson(`api repos/${owner}/${item.content.repository}/pulls/${item.content.number}/reviews`);
-          const isApproved = reviews?.some(r => r.state === 'APPROVED');
-          if (isApproved) approved.push(item);
-        } catch {
-          // Skip
-        }
-      }
-      return approved;
+      return classifyInReview().approved;
     },
 
     moveToInProgress(item) { return moveItem(item, 'inProgress'); },

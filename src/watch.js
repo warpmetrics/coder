@@ -13,9 +13,15 @@ export async function watch() {
   const pollInterval = (config.pollInterval || 30) * 1000;
 
   let running = true;
+  let sleepResolve = null;
   const shutdown = () => {
-    console.log('\nShutting down...');
+    if (!running) {
+      console.log('\nForce exit.');
+      process.exit(1);
+    }
+    console.log('\nShutting down... (Ctrl+C again to force)');
     running = false;
+    if (sleepResolve) sleepResolve();
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
@@ -29,6 +35,9 @@ export async function watch() {
 
   while (running) {
     try {
+      // Fetch all project items once per poll cycle
+      board.refresh();
+
       // 1. Pick up new tasks from Todo
       const todoItems = await board.listTodo();
       if (todoItems.length > 0) {
@@ -41,7 +50,7 @@ export async function watch() {
       const reviewItems = await board.listInReview();
       for (const item of reviewItems) {
         if (!running) break;
-        log(`Found review feedback: PR #${item.content?.number}`);
+        log(`Found review feedback: PR #${item._prNumber || item.content?.number}`);
         await revise(item, { board, config, log });
       }
 
@@ -49,8 +58,8 @@ export async function watch() {
       const approvedItems = await board.listApproved();
       for (const item of approvedItems) {
         if (!running) break;
-        const prNumber = item.content?.number;
-        const repoName = config.repo.replace(/\.git$/, '').split('/').pop();
+        const prNumber = item._prNumber || item.content?.number;
+        const repoName = config.repo.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');
         log(`Merging approved PR #${prNumber}`);
         try {
           runHook('onBeforeMerge', config, { prNumber, repo: repoName });
@@ -66,9 +75,12 @@ export async function watch() {
       log(`Poll error: ${err.message}`);
     }
 
-    // Sleep
+    // Sleep (interruptible)
     if (running) {
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      await new Promise(resolve => {
+        sleepResolve = resolve;
+        setTimeout(() => { sleepResolve = null; resolve(); }, pollInterval);
+      });
     }
   }
 

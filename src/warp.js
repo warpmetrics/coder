@@ -117,14 +117,13 @@ export async function startPipeline(apiKey, { step, repo, issueNumber, issueTitl
   return { runId, groupId };
 }
 
-export async function recordOutcome(apiKey, groupId, { step, success, costUsd, error, hooksFailed, issueNumber, prNumber, reviewCommentCount }) {
+export async function recordOutcome(apiKey, { runId, groupId }, { step, success, costUsd, error, hooksFailed, issueNumber, prNumber, reviewCommentCount }) {
   const names = {
     implement: { true: 'PR Created', false: 'Implementation Failed' },
     revise: { true: 'Fixes Applied', false: 'Revision Failed' },
   };
 
   const name = names[step]?.[String(success)] || `${step}: ${success ? 'success' : 'failure'}`;
-  const id = generateId('oc');
   const now = new Date().toISOString();
 
   const opts = { status: success ? 'success' : 'failure', step };
@@ -135,11 +134,23 @@ export async function recordOutcome(apiKey, groupId, { step, success, costUsd, e
   if (prNumber) opts.pr_number = String(prNumber);
   if (reviewCommentCount) opts.review_comments = String(reviewCommentCount);
 
-  await sendEvents(apiKey, {
-    outcomes: [{ id, refId: groupId, name, opts, timestamp: now }],
-  });
+  const outcomes = [
+    { id: generateId('oc'), refId: groupId, name, opts, timestamp: now },
+  ];
+  if (runId) {
+    outcomes.push({ id: generateId('oc'), refId: runId, name, opts, timestamp: now });
+  }
 
-  return { id, name };
+  await sendEvents(apiKey, { outcomes });
+
+  return { id: outcomes[0].id, name };
+}
+
+export async function emitAct(apiKey, { outcomeId, actId, name, opts }) {
+  const now = new Date().toISOString();
+  await sendEvents(apiKey, {
+    acts: [{ id: actId, refId: outcomeId, name, opts: opts || null, timestamp: now }],
+  });
 }
 
 export async function countRevisions(apiKey, { prNumber, repo }) {

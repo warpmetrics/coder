@@ -13,14 +13,22 @@ import { reflect } from './reflect.js';
 const CONFIG_DIR = '.warp-coder';
 
 export async function revise(item, { board, config, log }) {
-  const prNumber = item.content?.number;
+  const prNumber = item._prNumber || item.content?.number;
   const repo = config.repo;
-  const repoName = repo.replace(/\.git$/, '').split('/').pop();
+  const repoName = repo.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');
   const maxRevisions = config.maxRevisions || 3;
   const workdir = join(tmpdir(), 'warp-coder', `revise-${prNumber}`);
   const configDir = join(process.cwd(), CONFIG_DIR);
 
   log(`Revising PR #${prNumber}`);
+
+  // Move to In Progress
+  try {
+    await board.moveToInProgress(item);
+    log('  moved to In Progress');
+  } catch (err) {
+    log(`  warning: could not move to In Progress: ${err.message}`);
+  }
 
   // Check revision limit
   if (config.warpmetricsApiKey) {
@@ -38,6 +46,7 @@ export async function revise(item, { board, config, log }) {
   }
 
   // WarpMetrics: start pipeline
+  let runId = null;
   let groupId = null;
   if (config.warpmetricsApiKey) {
     try {
@@ -46,8 +55,9 @@ export async function revise(item, { board, config, log }) {
         repo: repoName,
         prNumber,
       });
+      runId = pipeline.runId;
       groupId = pipeline.groupId;
-      log(`  pipeline: run=${pipeline.runId} group=${groupId}`);
+      log(`  pipeline: run=${runId} group=${groupId}`);
     } catch (err) {
       log(`  warning: pipeline start failed: ${err.message}`);
     }
@@ -63,22 +73,51 @@ export async function revise(item, { board, config, log }) {
     // Clone + checkout PR branch
     rmSync(workdir, { recursive: true, force: true });
     mkdirSync(workdir, { recursive: true });
-    log(`  cloning into ${workdir}`);
-    git.cloneRepo(repo, workdir);
-
     const branch = git.getPRBranch(prNumber, { repo: repoName });
-    git.checkoutBranch(workdir, branch);
-    log(`  branch: ${branch}`);
+    log(`  cloning into ${workdir} (branch: ${branch})`);
+    git.cloneRepo(repo, workdir, { branch });
 
     // Fetch review comments for context
+    let inlineComments = [];
     try {
       reviewComments = git.getReviews(prNumber, { repo: repoName });
     } catch (err) {
       log(`  warning: could not fetch reviews: ${err.message}`);
     }
+    try {
+      inlineComments = git.getReviewComments(prNumber, { repo: repoName });
+    } catch (err) {
+      log(`  warning: could not fetch inline comments: ${err.message}`);
+    }
 
     // Load memory for prompt enrichment
     const memory = config.memory?.enabled !== false ? loadMemory(configDir) : '';
+
+    // Build review feedback section (truncate to ~20k chars to stay within context)
+    const maxReviewChars = 20000;
+    let reviewSection = '';
+
+    for (const r of reviewComments) {
+      const body = (r.body || '').trim();
+      if (!body) continue;
+      const user = r.user?.login || 'unknown';
+      reviewSection += `**${user}** (${r.state || 'COMMENT'}):\n${body}\n\n`;
+    }
+
+    if (inlineComments.length > 0) {
+      reviewSection += '### Inline comments\n\n';
+      for (const c of inlineComments) {
+        const user = c.user?.login || 'unknown';
+        const body = (c.body || '').trim();
+        if (!body) continue;
+        const location = c.path ? `\`${c.path}${c.line ? `:${c.line}` : ''}\`` : '';
+        reviewSection += `${location} — **${user}**:\n${body}\n\n`;
+      }
+    }
+
+    if (reviewSection.length > maxReviewChars) {
+      reviewSection = reviewSection.slice(0, maxReviewChars) + '\n\n(Review truncated — focus on the comments shown above.)\n';
+    }
 
     // Claude
     const promptParts = [
@@ -95,13 +134,20 @@ export async function revise(item, { board, config, log }) {
       );
     }
 
+    if (reviewSection) {
+      promptParts.push('A code review has been submitted. Here is the feedback:');
+      promptParts.push('');
+      promptParts.push(reviewSection);
+    } else {
+      promptParts.push('A code review has been submitted but no comments could be fetched — check the PR manually.');
+      promptParts.push('');
+    }
     promptParts.push(
-      'A code review has been submitted with comments. Your job:',
+      'Your job:',
       '',
-      '1. Read all review comments on this PR',
-      '2. Apply the suggested fixes',
-      '3. Run tests to make sure everything passes',
-      '4. Commit the fixes with a message like "Address review feedback"',
+      '1. Apply the suggested fixes',
+      '2. Run tests to make sure everything passes',
+      '3. Commit all changes with a message like "Address review feedback" — this is critical, do not skip the commit',
       '',
       'Do NOT open a new PR — just implement the fixes and commit.',
     );
@@ -126,6 +172,12 @@ export async function revise(item, { board, config, log }) {
       throw err;
     }
 
+    // Auto-commit if Claude left uncommitted changes
+    if (git.status(workdir)) {
+      log('  claude forgot to commit — auto-committing');
+      git.commitAll(workdir, 'Address review feedback');
+    }
+
     // Push
     log('  pushing...');
     git.push(workdir, branch);
@@ -141,11 +193,16 @@ export async function revise(item, { board, config, log }) {
   } catch (err) {
     taskError = err.message;
     log(`  failed: ${err.message}`);
+    try {
+      await board.moveToBlocked(item);
+    } catch (moveErr) {
+      log(`  warning: could not move to Blocked: ${moveErr.message}`);
+    }
   } finally {
     // WarpMetrics: record outcome
     if (config.warpmetricsApiKey && groupId) {
       try {
-        const outcome = await warp.recordOutcome(config.warpmetricsApiKey, groupId, {
+        const outcome = await warp.recordOutcome(config.warpmetricsApiKey, { runId, groupId }, {
           step: 'revise',
           success,
           costUsd: claudeResult?.costUsd,
