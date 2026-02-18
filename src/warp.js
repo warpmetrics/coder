@@ -113,7 +113,7 @@ export async function createIssueRun(apiKey, { repo, issueNumber, issueTitle }) 
   const now = new Date().toISOString();
 
   await sendEvents(apiKey, {
-    runs: [{ id: runId, label: 'Issue', opts: { name: `Issue #${issueNumber}: ${issueTitle}`, repo, issue: String(issueNumber) }, refId: null, timestamp: now }],
+    runs: [{ id: runId, label: 'Issue', opts: { name: `Issue #${issueNumber}: ${issueTitle}`, repo, issue: String(issueNumber) }, refId: null, startedAt: now }],
     outcomes: [{ id: outcomeId, refId: runId, name: 'Started', opts: null, timestamp: now }],
     acts: [{ id: actId, refId: outcomeId, name: 'Implement', opts: null, timestamp: now }],
   });
@@ -146,8 +146,8 @@ export async function startPipeline(apiKey, { step, repo, issueNumber, issueTitl
   if (prNumber) opts.pr_number = String(prNumber);
 
   await sendEvents(apiKey, {
-    runs: [{ id: runId, label, opts, refId: refActId || null, timestamp: now }],
-    groups: [{ id: groupId, label, opts: { triggered_at: now }, timestamp: now }],
+    runs: [{ id: runId, label, opts, refId: refActId || null, startedAt: now }],
+    groups: [{ id: groupId, label, opts: { triggered_at: now }, startedAt: now }],
     links: [{ parentId: runId, childId: groupId, type: 'group', timestamp: now }],
   });
 
@@ -230,8 +230,8 @@ export async function recordClarification(apiKey, { issueRunId, question }) {
   await sendEvents(apiKey, {
     outcomes: [{ id: outcomeId, refId: issueRunId, name: 'Needs Clarification', opts: null, timestamp: now }],
     acts: [{ id: actId, refId: outcomeId, name: 'Ask User', opts: { question: question.slice(0, 500) }, timestamp: now }],
-    runs: [{ id: clarifyRunId, label: 'Clarify', opts: null, refId: actId, timestamp: now }],
-    groups: [{ id: clarifyGroupId, label: 'Clarify', opts: { triggered_at: now }, timestamp: now }],
+    runs: [{ id: clarifyRunId, label: 'Clarify', opts: null, refId: actId, startedAt: now }],
+    groups: [{ id: clarifyGroupId, label: 'Clarify', opts: { triggered_at: now }, startedAt: now }],
     links: [{ parentId: clarifyRunId, childId: clarifyGroupId, type: 'group', timestamp: now }],
   });
 
@@ -267,7 +267,7 @@ export async function startReleaseRun(apiKey, { refActId, repos }) {
   const now = new Date().toISOString();
 
   await sendEvents(apiKey, {
-    runs: [{ id: runId, label: 'Release', opts: { repos: repos.join(',') }, refId: refActId || null, timestamp: now }],
+    runs: [{ id: runId, label: 'Release', opts: { repos: repos.join(',') }, refId: refActId || null, startedAt: now }],
   });
 
   return { runId };
@@ -281,7 +281,7 @@ export async function createGroup(apiKey, { runId, label, opts }) {
   const now = new Date().toISOString();
 
   await sendEvents(apiKey, {
-    groups: [{ id: groupId, label, opts: opts || null, timestamp: now }],
+    groups: [{ id: groupId, label, opts: opts || null, startedAt: now }],
     links: [{ parentId: runId, childId: groupId, type: 'group', timestamp: now }],
   });
 
