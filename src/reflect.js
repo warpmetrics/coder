@@ -1,7 +1,16 @@
 import * as claude from './claude.js';
 import { loadMemory, saveMemory } from './memory.js';
 
-export async function reflect({ configDir, step, issue, prNumber, success, error, hookOutputs, reviewComments, claudeOutput, maxLines = 100 }) {
+// Serialize concurrent reflect calls so memory file doesn't get corrupted
+let lock = Promise.resolve();
+
+export function reflect(args) {
+  const p = lock.then(() => _reflect(args));
+  lock = p.catch(() => {}); // lock advances even on error
+  return p;
+}
+
+async function _reflect({ configDir, step, issue, prNumber, success, error, hookOutputs, reviewComments, claudeOutput, maxLines = 100 }) {
   const currentMemory = loadMemory(configDir);
 
   const sections = [
@@ -59,21 +68,17 @@ export async function reflect({ configDir, step, issue, prNumber, success, error
     `- Output ONLY the memory file content, no explanation.`,
   ].join('\n');
 
-  try {
-    const result = await claude.run({
-      prompt,
-      workdir: process.cwd(),
-      allowedTools: '',
-      maxTurns: 1,
-      verbose: false,
-    });
+  const result = await claude.run({
+    prompt,
+    workdir: process.cwd(),
+    allowedTools: '',
+    maxTurns: 1,
+    timeout: 60000, // 1 minute for reflection
+    verbose: false,
+  });
 
-    const content = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
-    saveMemory(configDir, content.trim() + '\n');
-  } catch (err) {
-    // Reflection is best-effort — don't break the pipeline
-    console.log(`  warning: reflect failed: ${err.message}`);
-  }
+  const content = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+  saveMemory(configDir, content.trim() + '\n');
 }
 
 function truncate(str, maxLen) {

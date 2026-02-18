@@ -1,7 +1,9 @@
 import { create as createGitHubProjects } from './github-projects.js';
+import { create as createLinear } from './linear.js';
 
 const providers = {
   'github-projects': createGitHubProjects,
+  'linear': createLinear,
 };
 
 export function createBoard(config) {

@@ -1,48 +1,48 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
-function run(cmd, opts = {}) {
-  return execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], ...opts }).trim();
+function git(args, opts = {}) {
+  return execFileSync('git', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], ...opts }).trim();
+}
+
+function gh(args, opts = {}) {
+  return execFileSync('gh', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], ...opts }).trim();
 }
 
 export function cloneRepo(repoUrl, dest, { branch } = {}) {
-  const branchFlag = branch ? ` --branch ${branch}` : '';
-  run(`git clone --depth 1${branchFlag} ${repoUrl} ${dest}`);
-}
-
-export function checkoutBranch(dir, branch) {
-  run(`git checkout ${branch}`, { cwd: dir });
+  git(['clone', ...(branch ? ['--branch', branch] : []), repoUrl, dest]);
 }
 
 export function createBranch(dir, name) {
-  run(`git checkout -b ${name}`, { cwd: dir });
+  git(['checkout', '-b', name], { cwd: dir });
 }
 
 export function getHead(dir) {
-  return run(`git rev-parse HEAD`, { cwd: dir });
+  return git(['rev-parse', 'HEAD'], { cwd: dir });
 }
 
-export function hasNewCommits(dir, base = 'main') {
-  const log = run(`git log ${base}..HEAD --oneline`, { cwd: dir });
-  return log.length > 0;
+export function hasNewCommits(dir) {
+  const count = git(['rev-list', '--count', 'HEAD', '--not', '--remotes'], { cwd: dir });
+  return parseInt(count, 10) > 0;
 }
 
 export function status(dir) {
-  return run(`git status --short`, { cwd: dir });
+  return git(['status', '--short'], { cwd: dir });
 }
 
-export function commitAll(dir, message) {
-  run(`git add -A`, { cwd: dir });
-  run(`git commit -m ${JSON.stringify(message)}`, { cwd: dir });
+export function commitAll(dir, message, { allowEmpty = false } = {}) {
+  git(['add', '-A'], { cwd: dir });
+  git(['commit', ...(allowEmpty ? ['--allow-empty'] : []), '-m', message], { cwd: dir });
 }
 
 export function push(dir, branch) {
-  run(`git push -u origin ${branch}`, { cwd: dir });
+  git(['push', '-u', '--force-with-lease', 'origin', branch], { cwd: dir });
 }
 
-export function createPR(dir, { title, body, base = 'main', head }) {
-  const headFlag = head ? ` --head ${head}` : '';
-  const out = run(`gh pr create --title ${JSON.stringify(title)} --body ${JSON.stringify(body)} --base ${base}${headFlag}`, { cwd: dir });
-  // gh pr create prints the PR URL as the last line
+export function createPR(dir, { title, body, base, head }) {
+  const args = ['pr', 'create', '--title', title, '--body-file', '-'];
+  if (base) args.push('--base', base);
+  if (head) args.push('--head', head);
+  const out = gh(args, { cwd: dir, input: body });
   const lines = out.split('\n');
   const url = lines[lines.length - 1];
   const match = url.match(/\/pull\/(\d+)/);
@@ -50,32 +50,66 @@ export function createPR(dir, { title, body, base = 'main', head }) {
 }
 
 export function mergePR(prNumber, { repo }) {
-  run(`gh pr merge ${prNumber} --squash --delete-branch --repo ${repo}`);
+  gh(['pr', 'merge', String(prNumber), '--squash', '--delete-branch', '--repo', repo]);
 }
 
 export function getReviews(prNumber, { repo }) {
-  const out = run(`gh api repos/${repo}/pulls/${prNumber}/reviews`);
+  const out = gh(['api', `repos/${repo}/pulls/${prNumber}/reviews`]);
   return JSON.parse(out);
 }
 
 export function getReviewComments(prNumber, { repo }) {
-  const out = run(`gh api repos/${repo}/pulls/${prNumber}/comments`);
+  const out = gh(['api', `repos/${repo}/pulls/${prNumber}/comments`]);
   return JSON.parse(out);
 }
 
 export function dismissReview(prNumber, reviewId, { repo, message }) {
-  run(`gh api repos/${repo}/pulls/${prNumber}/reviews/${reviewId}/dismissals -X PUT -f message=${JSON.stringify(message)}`);
+  gh(['api', `repos/${repo}/pulls/${prNumber}/reviews/${reviewId}/dismissals`, '-X', 'PUT', '-f', `message=${message}`]);
 }
 
 export function updatePRBody(prNumber, { repo, body }) {
-  run(`gh pr edit ${prNumber} --repo ${repo} --body ${JSON.stringify(body)}`);
+  gh(['pr', 'edit', String(prNumber), '--repo', repo, '--body-file', '-'], { input: body });
 }
 
 export function getPRBody(prNumber, { repo }) {
-  return run(`gh pr view ${prNumber} --repo ${repo} --json body --jq .body`);
+  return gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'body', '--jq', '.body']);
 }
 
 export function getPRBranch(prNumber, { repo }) {
-  const out = run(`gh pr view ${prNumber} --repo ${repo} --json headRefName --jq .headRefName`);
-  return out;
+  return gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefName', '--jq', '.headRefName']);
+}
+
+export function getPRState(prNumber, { repo }) {
+  return gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state', '--jq', '.state']);
+}
+
+export function getCurrentBranch(dir) {
+  return git(['branch', '--show-current'], { cwd: dir });
+}
+
+export function getPRFiles(prNumber, { repo }) {
+  const out = gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'files', '--jq', '.files']);
+  return JSON.parse(out);
+}
+
+export function getPRCommits(prNumber, { repo }) {
+  const out = gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'commits', '--jq', '.commits']);
+  return JSON.parse(out);
+}
+
+export function getIssueComments(issueId, { repo }) {
+  const out = gh(['api', `repos/${repo}/issues/${issueId}/comments`, '--paginate']);
+  return JSON.parse(out);
+}
+
+export function commentOnIssue(issueId, { repo, body }) {
+  gh(['issue', 'comment', String(issueId), '--repo', repo, '--body-file', '-'], { input: body });
+}
+
+export function botComment(issueId, { repo, body, runId }) {
+  const header = runId
+    ? `**warp-coder** · [run](https://warpmetrics.com/app/runs/${runId})`
+    : '**warp-coder**';
+  const formatted = `${header}\n\n---\n\n${body}`;
+  commentOnIssue(issueId, { repo, body: formatted });
 }

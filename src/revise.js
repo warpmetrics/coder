@@ -1,29 +1,37 @@
-// Apply review feedback on an existing PR.
+// Apply review feedback on existing PRs.
 
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { repoName, deriveRepoDirNames, CONFIG_DIR } from './config.js';
 import * as git from './git.js';
 import * as claude from './claude.js';
 import * as warp from './warp.js';
-import { runHook } from './hooks.js';
+import { warp as warpInit, trace, flush } from '@warpmetrics/warp';
+import { safeHook } from './hooks.js';
 import { loadMemory } from './memory.js';
 import { reflect } from './reflect.js';
 
-const CONFIG_DIR = '.warp-coder';
-
-export async function revise(item, { board, config, log, refActId, since }) {
-  const prNumber = item._prNumber || item.content?.number;
-  const repo = config.repo;
-  const repoName = repo.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');
+export async function revise(item, { board, config, log, refActId, since, onStep, onBeforeLog }) {
+  const issueId = item._issueId;
+  const prs = item._prs || [];
+  const primaryPR = prs[0];
+  const primaryRepoName = primaryPR ? primaryPR.repo : repoName(config.repos[0]);
+  const primaryPRNumber = primaryPR?.prNumber || item._prNumber || item.content?.number;
+  const repos = config.repos;
   const maxRevisions = config.maxRevisions || 3;
-  const workdir = join(tmpdir(), 'warp-coder', `revise-${prNumber}`);
+  const workdir = join(tmpdir(), 'warp-coder', `revise-${issueId}`);
   const configDir = join(process.cwd(), CONFIG_DIR);
 
-  // Pre-generate act ID for chaining (update PR body so warp-review can link next review)
+  // Pre-generate act ID for chaining — only written to primary PR body
   const actId = config.warpmetricsApiKey ? warp.generateId('act') : null;
 
-  log(`Revising PR #${prNumber}`);
+  log(`Revising ${prs.length} PR(s) for #${issueId}`);
+
+  // Initialize warp SDK for trace() calls
+  if (config.warpmetricsApiKey) {
+    warpInit(null, { apiKey: config.warpmetricsApiKey });
+  }
 
   // Move to In Progress
   try {
@@ -33,10 +41,10 @@ export async function revise(item, { board, config, log, refActId, since }) {
     log(`  warning: could not move to In Progress: ${err.message}`);
   }
 
-  // Check revision limit
-  if (config.warpmetricsApiKey) {
+  // Check revision limit (use primary PR)
+  if (config.warpmetricsApiKey && primaryPRNumber) {
     try {
-      const revisionCount = await warp.countRevisions(config.warpmetricsApiKey, { prNumber, repo: repoName, since });
+      const revisionCount = await warp.countRevisions(config.warpmetricsApiKey, { prNumber: primaryPRNumber, repo: primaryRepoName, since });
       if (revisionCount >= maxRevisions) {
         log(`  revision limit reached (${revisionCount}/${maxRevisions}) — moving to Blocked`);
         try { await board.moveToBlocked(item); } catch {}
@@ -55,8 +63,8 @@ export async function revise(item, { board, config, log, refActId, since }) {
     try {
       const pipeline = await warp.startPipeline(config.warpmetricsApiKey, {
         step: 'revise',
-        repo: repoName,
-        prNumber,
+        repo: primaryRepoName,
+        prNumber: primaryPRNumber,
         refActId,
       });
       runId = pipeline.runId;
@@ -70,28 +78,62 @@ export async function revise(item, { board, config, log, refActId, since }) {
   let success = false;
   let claudeResult = null;
   let taskError = null;
-  let reviewComments = [];
+  let hitMaxTurns = false;
+  let allReviewComments = [];
   const hookOutputs = [];
 
   try {
-    // Clone + checkout PR branch
+    // Clone repos
+    onStep?.('cloning');
     rmSync(workdir, { recursive: true, force: true });
     mkdirSync(workdir, { recursive: true });
-    const branch = git.getPRBranch(prNumber, { repo: repoName });
-    log(`  cloning into ${workdir} (branch: ${branch})`);
-    git.cloneRepo(repo, workdir, { branch });
 
-    // Fetch review comments for context
-    let inlineComments = [];
-    try {
-      reviewComments = git.getReviews(prNumber, { repo: repoName });
-    } catch (err) {
-      log(`  warning: could not fetch reviews: ${err.message}`);
+    // Build a lookup: repoName → { prNumber, branch }
+    const prLookup = new Map();
+    for (const { repo, prNumber } of prs) {
+      const branch = git.getPRBranch(prNumber, { repo });
+      prLookup.set(repo, { prNumber, branch });
     }
-    try {
-      inlineComments = git.getReviewComments(prNumber, { repo: repoName });
-    } catch (err) {
-      log(`  warning: could not fetch inline comments: ${err.message}`);
+
+    const dirNames = deriveRepoDirNames(repos);
+    const repoDirs = []; // { url, name, dirName, dir, prNumber, branch, hasPR }
+    const contextRepos = []; // repos without PRs, available for on-demand cloning
+    const headsBefore = new Map(); // dir → HEAD sha
+
+    for (let i = 0; i < repos.length; i++) {
+      const repoUrl = repos[i];
+      const name = repoName(repoUrl);
+      const dirName = dirNames[i];
+      const dest = join(workdir, dirName);
+      const prInfo = prLookup.get(name);
+
+      if (prInfo) {
+        log(`  cloning ${name} (branch: ${prInfo.branch})`);
+        git.cloneRepo(repoUrl, dest, { branch: prInfo.branch });
+        repoDirs.push({ url: repoUrl, name, dirName, dir: dest, prNumber: prInfo.prNumber, branch: prInfo.branch, hasPR: true });
+        headsBefore.set(dest, git.getHead(dest));
+      } else {
+        // No PR in this repo — don't clone, mention in prompt for on-demand reference
+        log(`  skipping ${name} (no PR — available for on-demand reference)`);
+        contextRepos.push({ url: repoUrl, name, dirName });
+      }
+    }
+
+    // Fetch review comments from ALL PRs
+    let allInlineComments = [];
+    for (const { repo, prNumber } of prs) {
+      try {
+        const reviews = git.getReviews(prNumber, { repo });
+        allReviewComments.push(...reviews.map(r => ({ ...r, _repo: repo, _prNumber: prNumber })));
+      } catch (err) {
+        log(`  warning: could not fetch reviews for ${repo}#${prNumber}: ${err.message}`);
+      }
+      try {
+        const inline = git.getReviewComments(prNumber, { repo });
+        allInlineComments.push(...inline.map(c => ({ ...c, _repo: repo, _prNumber: prNumber })));
+      } catch (err) {
+        log(`  warning: could not fetch inline comments for ${repo}#${prNumber}: ${err.message}`);
+      }
     }
 
     // Load memory for prompt enrichment
@@ -101,21 +143,23 @@ export async function revise(item, { board, config, log, refActId, since }) {
     const maxReviewChars = 20000;
     let reviewSection = '';
 
-    for (const r of reviewComments) {
+    for (const r of allReviewComments) {
       const body = (r.body || '').trim();
       if (!body) continue;
       const user = r.user?.login || 'unknown';
-      reviewSection += `**${user}** (${r.state || 'COMMENT'}):\n${body}\n\n`;
+      const prefix = prs.length > 1 ? `[${r._repo}#${r._prNumber}] ` : '';
+      reviewSection += `${prefix}**${user}** (${r.state || 'COMMENT'}):\n${body}\n\n`;
     }
 
-    if (inlineComments.length > 0) {
+    if (allInlineComments.length > 0) {
       reviewSection += '### Inline comments\n\n';
-      for (const c of inlineComments) {
+      for (const c of allInlineComments) {
         const user = c.user?.login || 'unknown';
         const body = (c.body || '').trim();
         if (!body) continue;
+        const prefix = prs.length > 1 ? `[${c._repo}] ` : '';
         const location = c.path ? `\`${c.path}${c.line ? `:${c.line}` : ''}\`` : '';
-        reviewSection += `${location} — **${user}**:\n${body}\n\n`;
+        reviewSection += `${prefix}${location} — **${user}**:\n${body}\n\n`;
       }
     }
 
@@ -123,11 +167,25 @@ export async function revise(item, { board, config, log, refActId, since }) {
       reviewSection = reviewSection.slice(0, maxReviewChars) + '\n\n(Review truncated — focus on the comments shown above.)\n';
     }
 
-    // Claude
-    const promptParts = [
-      `You are working on PR #${prNumber} in ${repoName}.`,
+    // Build Claude prompt
+    const promptParts = [];
+
+    const dirList = repoDirs.map(r => `  - ${r.dirName}/ (${r.name}) — PR #${r.prNumber}`).join('\n');
+    promptParts.push(
+      `Repos with PRs (already cloned):`,
+      dirList,
       '',
-    ];
+    );
+    if (contextRepos.length > 0) {
+      promptParts.push(
+        `Other repos available for reference if needed:`,
+        '',
+      );
+      for (const cr of contextRepos) {
+        promptParts.push(`  git clone ${cr.url} ${cr.dirName}`);
+      }
+      promptParts.push('');
+    }
 
     if (memory) {
       promptParts.push(
@@ -146,6 +204,7 @@ export async function revise(item, { board, config, log, refActId, since }) {
       promptParts.push('A code review has been submitted but no comments could be fetched — check the PR manually.');
       promptParts.push('');
     }
+
     promptParts.push(
       'Your job:',
       '',
@@ -156,89 +215,144 @@ export async function revise(item, { board, config, log, refActId, since }) {
       'Do NOT open a new PR — just implement the fixes and commit.',
     );
 
+    if (repoDirs.length > 1) {
+      promptParts.push('Commit separately in each repo that needs changes.');
+    }
+
     const prompt = promptParts.join('\n');
 
-    const headBefore = git.getHead(workdir);
-
+    onStep?.('claude');
     log('  running claude...');
+    const claudeStart = Date.now();
     claudeResult = await claude.run({
       prompt,
       workdir,
       allowedTools: config.claude?.allowedTools,
       maxTurns: config.claude?.maxTurns,
+      logPrefix: `[#${issueId}] `,
+      onBeforeLog,
     });
+    const claudeDuration = Date.now() - claudeStart;
     log(`  claude done (cost: $${claudeResult.costUsd ?? '?'})`);
 
+    // Trace the Claude Code call in WarpMetrics
+    if (groupId) {
+      try {
+        trace(groupId, {
+          provider: 'anthropic',
+          model: 'claude-code',
+          duration: claudeDuration,
+          startedAt: new Date(claudeStart).toISOString(),
+          endedAt: new Date(claudeStart + claudeDuration).toISOString(),
+          cost: claudeResult.costUsd,
+          status: claudeResult.subtype === 'error_max_turns' ? 'error' : 'success',
+          opts: {
+            turns: claudeResult.numTurns,
+            session_id: claudeResult.sessionId,
+          },
+        });
+        await flush();
+      } catch {}
+    }
+
+    // Check if Claude hit max turns
+    if (claudeResult.subtype === 'error_max_turns') {
+      hitMaxTurns = true;
+      throw new Error(`Claude reached the maximum number of turns (${claudeResult.numTurns || config.claude?.maxTurns || '?'}) without completing the task`);
+    }
+
     // Hook: onBeforePush
-    try {
-      const h = runHook('onBeforePush', config, { workdir, prNumber, branch, repo: repoName });
-      if (h.ran) hookOutputs.push(h);
-    } catch (err) {
-      if (err.hookResult) hookOutputs.push(err.hookResult);
-      throw err;
-    }
+    onStep?.('pushing');
+    safeHook('onBeforePush', config, { workdir, prNumber: primaryPRNumber, branch: repoDirs.find(r => r.hasPR)?.branch, repo: primaryRepoName }, hookOutputs);
 
-    // Auto-commit if Claude left uncommitted changes
-    if (git.status(workdir)) {
-      log('  claude forgot to commit — auto-committing');
-      git.commitAll(workdir, 'Address review feedback');
-    }
+    // Check each repo with a PR for changes, auto-commit, push
+    let anyChanges = false;
 
-    // Check if Claude actually made changes
-    const headAfter = git.getHead(workdir);
-    if (headAfter === headBefore) {
-      log('  no changes needed — review feedback already addressed');
+    for (const rd of repoDirs) {
+      if (!rd.hasPR) continue;
 
-      // Dismiss active CHANGES_REQUESTED reviews (they're stale)
-      try {
-        const reviews = git.getReviews(prNumber, { repo: repoName });
-        for (const r of reviews) {
-          if (r.state === 'CHANGES_REQUESTED') {
-            git.dismissReview(prNumber, r.id, {
-              repo: repoName,
-              message: 'Code verified correct by warp-coder — no changes needed.',
-            });
-            log(`  dismissed stale review ${r.id}`);
-          }
-        }
-      } catch (err) {
-        log(`  warning: could not dismiss stale reviews: ${err.message}`);
+      // Exclude temp files so git add -A doesn't pick them up
+      const excludeFile = join(rd.dir, '.git', 'info', 'exclude');
+      const existing = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf-8') : '';
+      if (!existing.includes('.warp-coder-ask')) {
+        writeFileSync(excludeFile, existing.trimEnd() + '\n.warp-coder-ask\n');
       }
 
-      // Move back to In Review (no active CHANGES_REQUESTED, so won't be picked up again)
-      try {
-        await board.moveToReview(item);
-      } catch (err) {
-        log(`  warning: could not move to In Review: ${err.message}`);
+      // Auto-commit if Claude left uncommitted changes
+      if (git.status(rd.dir)) {
+        log(`  ${rd.dirName}: claude forgot to commit — auto-committing`);
+        git.commitAll(rd.dir, 'Address review feedback');
       }
-      success = true;
-    } else {
-      // Push
-      log('  pushing...');
-      git.push(workdir, branch);
 
-      // Update PR body with new act ID for next review cycle
-      if (actId) {
+      const headAfter = git.getHead(rd.dir);
+      const headBefore = headsBefore.get(rd.dir);
+
+      if (headAfter === headBefore) {
+        log(`  ${rd.dirName}: no changes`);
+        continue;
+      }
+
+      anyChanges = true;
+      log(`  ${rd.dirName}: pushing...`);
+      git.push(rd.dir, rd.branch);
+    }
+
+    // Update act marker on all PRs so any repo's review can trigger revise
+    if (actId) {
+      for (const rd of repoDirs) {
+        if (!rd.hasPR) continue;
         try {
-          let body = git.getPRBody(prNumber, { repo: repoName });
+          let body = git.getPRBody(rd.prNumber, { repo: rd.name });
           body = body.replace(/<!-- wm:act:wm_act_\w+ -->/, `<!-- wm:act:${actId} -->`);
           if (!body.includes(`<!-- wm:act:${actId} -->`)) {
             body += `\n\n<!-- wm:act:${actId} -->`;
           }
-          git.updatePRBody(prNumber, { repo: repoName, body });
+          git.updatePRBody(rd.prNumber, { repo: rd.name, body });
         } catch (err) {
           log(`  warning: could not update PR body with act ID: ${err.message}`);
         }
       }
-
-      // Move back to In Review
-      try {
-        await board.moveToReview(item);
-      } catch (err) {
-        log(`  warning: could not move to In Review: ${err.message}`);
-      }
-      success = true;
     }
+
+    if (!anyChanges) {
+      log('  no changes needed — review feedback already addressed');
+
+      // Dismiss active CHANGES_REQUESTED reviews across all PRs
+      for (const { repo, prNumber } of prs) {
+        try {
+          const reviews = git.getReviews(prNumber, { repo });
+          for (const r of reviews) {
+            if (r.state === 'CHANGES_REQUESTED') {
+              git.dismissReview(prNumber, r.id, {
+                repo,
+                message: 'Code verified correct by warp-coder — no changes needed.',
+              });
+              log(`  dismissed stale review ${r.id} on ${repo}#${prNumber}`);
+            }
+          }
+        } catch (err) {
+          log(`  warning: could not dismiss stale reviews on ${repo}#${prNumber}: ${err.message}`);
+        }
+      }
+
+      // Empty commit + push on each PR repo to trigger fresh warp-review
+      for (const rd of repoDirs) {
+        if (!rd.hasPR) continue;
+        git.commitAll(rd.dir, 'Verified correct — review feedback already addressed', { allowEmpty: true });
+        git.push(rd.dir, rd.branch);
+      }
+      log('  pushed empty commits to trigger review');
+    }
+
+    // Move back to In Review
+    try {
+      await board.moveToReview(item);
+      log('  moved to In Review');
+    } catch (err) {
+      log(`  warning: could not move to In Review: ${err.message}`);
+    }
+
+    success = true;
   } catch (err) {
     taskError = err.message;
     log(`  failed: ${err.message}`);
@@ -257,8 +371,9 @@ export async function revise(item, { board, config, log, refActId, since }) {
           costUsd: claudeResult?.costUsd,
           error: taskError,
           hooksFailed: hookOutputs.some(h => h.exitCode !== 0),
-          prNumber,
-          reviewCommentCount: reviewComments.length,
+          prNumber: primaryPRNumber,
+          reviewCommentCount: allReviewComments.length,
+          ...(hitMaxTurns ? { name: 'Max Retries' } : {}),
         });
         log(`  outcome: ${outcome.name}`);
 
@@ -267,7 +382,7 @@ export async function revise(item, { board, config, log, refActId, since }) {
           await warp.emitAct(config.warpmetricsApiKey, {
             outcomeId: outcome.runOutcomeId,
             actId,
-            name: 'review',
+            name: 'Review',
           });
         }
       } catch (err) {
@@ -281,11 +396,11 @@ export async function revise(item, { board, config, log, refActId, since }) {
         await reflect({
           configDir,
           step: 'revise',
-          prNumber,
+          prNumber: primaryPRNumber,
           success,
           error: taskError,
           hookOutputs: hookOutputs.filter(h => h.ran),
-          reviewComments,
+          reviewComments: allReviewComments,
           claudeOutput: claudeResult?.result,
           maxLines: config.memory?.maxLines || 100,
         });

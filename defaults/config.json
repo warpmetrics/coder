@@ -8,12 +8,12 @@
       "inProgress": "In Progress",
       "inReview": "In Review",
       "done": "Done",
-      "blocked": "Blocked"
+      "blocked": "Blocked",
+      "waiting": "Waiting"
     }
   },
   "hooks": {},
   "claude": {
-    "allowedTools": "Bash,Read,Edit,Write,Glob,Grep",
     "maxTurns": 20
   },
   "memory": {
@@ -22,5 +22,5 @@
   },
   "pollInterval": 30,
   "maxRevisions": 3,
-  "repo": "git@github.com:your-org/your-repo.git"
+  "repos": ["git@github.com:your-org/your-repo.git"]
 }

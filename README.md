@@ -43,7 +43,8 @@ Every step is instrumented with [WarpMetrics](https://warpmetrics.com) — you g
       "inProgress": "In Progress",
       "inReview": "In Review",
       "done": "Done",
-      "blocked": "Blocked"
+      "blocked": "Blocked",
+      "waiting": "Waiting"
     }
   },
   "hooks": {

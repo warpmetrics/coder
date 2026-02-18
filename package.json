@@ -7,6 +7,7 @@
     "warp-coder": "./bin/cli.js"
   },
   "scripts": {
+    "test": "node --test 'test/*.test.js'",
     "release:patch": "npm version patch && git push origin main --tags",
     "release:minor": "npm version minor && git push origin main --tags"
   },
@@ -29,5 +30,8 @@
     "llm",
     "code-generation",
     "automation"
-  ]
+  ],
+  "dependencies": {
+    "@warpmetrics/warp": "^0.0.19"
+  }
 }

@@ -3,15 +3,12 @@
 import { createInterface } from 'readline';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { registerClassifications } from '../src/warp.js';
+import { CONFIG_DIR } from '../src/config.js';
 import { discoverProjectFields } from '../src/boards/github-projects.js';
 import { loadMemory } from '../src/memory.js';
 import { reflect } from '../src/reflect.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const defaultsDir = join(__dirname, '..', 'defaults');
 
 const command = process.argv[2];
 
@@ -21,11 +18,20 @@ if (command === 'watch') {
 } else if (command === 'init') {
   await runInit();
 } else if (command === 'memory') {
-  const configDir = join(process.cwd(), '.warp-coder');
+  const configDir = join(process.cwd(), CONFIG_DIR);
   const memory = loadMemory(configDir);
   console.log(memory || '(no memory yet)');
+} else if (command === 'release') {
+  const preview = process.argv.includes('--preview');
+  if (preview) {
+    const { releasePreview } = await import('../src/release.js');
+    await releasePreview();
+  } else {
+    const { release } = await import('../src/release.js');
+    await release();
+  }
 } else if (command === 'compact') {
-  const configDir = join(process.cwd(), '.warp-coder');
+  const configDir = join(process.cwd(), CONFIG_DIR);
   const { loadConfig } = await import('../src/config.js');
   const config = loadConfig();
   console.log('Compacting memory...');
@@ -38,6 +44,8 @@ if (command === 'watch') {
   console.log('  Usage:');
   console.log('    warp-coder init      Set up config for a project');
   console.log('    warp-coder watch     Start the poll loop');
+  console.log('    warp-coder release             Release shipped issues (packages + deploys)');
+  console.log('    warp-coder release --preview   Preview changelog entries without releasing');
   console.log('    warp-coder memory    Print current memory file');
   console.log('    warp-coder compact   Force-rewrite memory file');
   console.log('');
@@ -124,7 +132,7 @@ async function runInit() {
     log('');
 
     // 5. Discover field IDs and column names
-    let columns = { todo: 'Todo', inProgress: 'In Progress', inReview: 'In Review', done: 'Done', blocked: 'Blocked' };
+    let columns = { todo: 'Todo', inProgress: 'In Progress', inReview: 'In Review', done: 'Done', blocked: 'Blocked', waiting: 'Waiting' };
     try {
       log('  Discovering project fields...');
       const fields = discoverProjectFields(parseInt(projectNumber, 10), owner);
@@ -156,12 +164,11 @@ async function runInit() {
       },
       hooks: {},
       claude: {
-        allowedTools: 'Bash,Read,Edit,Write,Glob,Grep',
         maxTurns: 20,
       },
       pollInterval: 30,
       maxRevisions: 3,
-      repo,
+      repos: [repo],
     };
 
     if (wmKey) {
@@ -169,7 +176,7 @@ async function runInit() {
     }
 
     // 7. Write config
-    const configDir = '.warp-coder';
+    const configDir = CONFIG_DIR;
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n');
     log(`  \u2713 ${configDir}/config.json created`);
