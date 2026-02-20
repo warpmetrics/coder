@@ -1,12 +1,13 @@
 {
   "board": {
-    "provider": "github-projects",
+    "provider": "github",
     "project": 1,
     "owner": "your-org",
     "columns": {
       "todo": "Todo",
       "inProgress": "In Progress",
       "inReview": "In Review",
+      "deploy": "Deploy",
       "done": "Done",
       "blocked": "Blocked",
       "waiting": "Waiting"

@@ -1,8 +1,8 @@
-import { create as createGitHubProjects } from './github-projects.js';
+import { create as createGitHub } from './github.js';
 import { create as createLinear } from './linear.js';
 
 const providers = {
-  'github-projects': createGitHubProjects,
+  'github': createGitHub,
   'linear': createLinear,
 };
 

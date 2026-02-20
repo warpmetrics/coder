@@ -1,6 +1,6 @@
 {
   "name": "@warpmetrics/coder",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "type": "module",
   "description": "Local agent loop for implementing GitHub issues with Claude Code. Powered by WarpMetrics.",
   "bin": {
@@ -32,6 +32,6 @@
     "automation"
   ],
   "dependencies": {
-    "@warpmetrics/warp": "^0.0.19"
+    "@warpmetrics/warp": "^0.0.20"
   }
 }

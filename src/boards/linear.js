@@ -31,9 +31,12 @@ export function create({ teamKey, apiKey, columns = {} }) {
     todo: columns.todo || 'Todo',
     inProgress: columns.inProgress || 'In Progress',
     inReview: columns.inReview || 'In Review',
+    readyForDeploy: columns.readyForDeploy || 'Ready for Deploy',
+    deploy: columns.deploy || 'Deploy',
     done: columns.done || 'Done',
     blocked: columns.blocked || 'Blocked',
     waiting: columns.waiting || 'Waiting',
+    aborted: columns.aborted || 'Aborted',
   };
 
   let cachedIssues = [];
@@ -174,8 +177,14 @@ export function create({ teamKey, apiKey, columns = {} }) {
     moveToTodo(item) { return moveItem(item, 'todo'); },
     moveToInProgress(item) { return moveItem(item, 'inProgress'); },
     moveToReview(item) { return moveItem(item, 'inReview'); },
+    moveToReadyForDeploy(item) { return moveItem(item, 'readyForDeploy'); },
+    moveToDeploy(item) { return moveItem(item, 'deploy'); },
     moveToBlocked(item) { return moveItem(item, 'blocked'); },
     moveToWaiting(item) { return moveItem(item, 'waiting'); },
     moveToDone(item) { return moveItem(item, 'done'); },
+
+    async listAborted() {
+      return issuesByState(colNames.aborted);
+    },
   };
 }

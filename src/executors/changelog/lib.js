@@ -4,51 +4,20 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
-// ---------------------------------------------------------------------------
-// Prompts (shared between watch.js merge-time and release.js preview)
-// ---------------------------------------------------------------------------
+import { PUBLIC_CHANGELOG as PUBLIC_PROMPT, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from '../../prompts.js';
 
-export const PUBLIC_PROMPT = `You are writing a public changelog entry for end users of WarpMetrics.
-
-Given the technical context below, write a changelog entry with:
-- title: Short, user-facing title (e.g. "Faster dashboard loading", "New export options")
-- summary: One sentence describing the change in plain language
-- content: 2-4 paragraphs of markdown describing what changed and why it matters to users
-
-CRITICAL RULES — violating any of these makes the entry unusable:
-- NEVER mention repository names, file paths, function names, or class names
-- NEVER mention internal architecture, database schemas, or infrastructure
-- NEVER mention specific technologies (Prisma, Redis, Express, React, etc.) unless they are user-facing
-- NEVER mention environment variables, config keys, API keys, or secrets
-- NEVER mention team members, bot names, or internal tools
-- NEVER mention PR numbers, commit hashes, or branch names
-- NEVER mention server names, IP addresses, ports, or deployment details
-- NEVER use developer jargon — write for a non-technical product user
-- DO focus on user-visible impact: what can they do now? what's better? what's fixed?
-- DO use clear, concise language a product manager would approve
-- If the change is purely internal with no user-visible impact, set title to "Internal improvements" and summarize briefly
-
-Respond with valid JSON only: { "title": "...", "summary": "...", "content": "...", "tags": ["feature"|"fix"|"improvement"|"internal"] }`;
-
-export const PRIVATE_PROMPT = `You are writing an internal/private changelog entry for the engineering team.
-
-Given the technical context below, write a changelog entry with:
-- title: Short technical title describing the change
-- summary: One sentence technical summary
-- content: Full technical details in markdown — include repo names, file paths, architectural decisions, everything relevant
-
-Respond with valid JSON only: { "title": "...", "summary": "...", "content": "...", "tags": ["feature"|"fix"|"improvement"|"internal"] }`;
+export { PUBLIC_PROMPT, PRIVATE_PROMPT };
 
 // ---------------------------------------------------------------------------
 // Entry generation (shared helper)
 // ---------------------------------------------------------------------------
 
-export function generateChangelogEntry(execFileSync, prompt) {
+export function generateChangelogEntry(execFileSync, prompt, { model = 'sonnet' } = {}) {
   try {
     const result = execFileSync('claude', [
       '-p', prompt,
       '--max-turns', '1',
-      '--model', 'sonnet',
+      '--model', model,
       '--no-session-persistence',
     ], { encoding: 'utf-8', timeout: 60000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 
