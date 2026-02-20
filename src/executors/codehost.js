@@ -101,9 +101,10 @@ export async function merge(item, { config, log, codehost, repoNames }) {
 
     return { type: 'success', prs: merged, prDetails };
   } else {
+    const failed = prs.filter(p => !merged.some(m => m.repo === p.repo && m.prNumber === p.prNumber));
     if (merged.length > 0) {
       log(`partial merge: ${merged.length}/${prs.length} PRs merged before failure`);
     }
-    return { type: 'error', error: mergeError?.message, prs: merged };
+    return { type: 'error', error: mergeError?.message, prs: merged, failedPrs: failed };
   }
 }

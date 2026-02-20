@@ -13,7 +13,8 @@ function gh(args, opts = {}) {
 
 function ghJson(args) {
   const out = gh(args);
-  return out ? JSON.parse(out) : null;
+  if (!out) return null;
+  try { return JSON.parse(out); } catch { return null; }
 }
 
 export function create({ reviewToken } = {}) {
@@ -93,24 +94,24 @@ export function create({ reviewToken } = {}) {
 
     getPRFiles(prNumber, { repo }) {
       const out = gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'files', '--jq', '.files']);
-      return JSON.parse(out);
+      try { return JSON.parse(out); } catch { return []; }
     },
 
     getPRCommits(prNumber, { repo }) {
       const out = gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'commits', '--jq', '.commits']);
-      return JSON.parse(out);
+      try { return JSON.parse(out); } catch { return []; }
     },
 
     // --- Review operations ---
 
     getReviews(prNumber, { repo }) {
       const out = gh(['api', `repos/${repo}/pulls/${prNumber}/reviews`]);
-      return JSON.parse(out);
+      try { return JSON.parse(out); } catch { return []; }
     },
 
     getReviewComments(prNumber, { repo }) {
       const out = gh(['api', `repos/${repo}/pulls/${prNumber}/comments`]);
-      return JSON.parse(out);
+      try { return JSON.parse(out); } catch { return []; }
     },
 
     submitReview(prNumber, { repo, body, event, comments }) {
@@ -151,7 +152,7 @@ export function create({ reviewToken } = {}) {
 
     getIssueComments(issueId, { repo }) {
       const out = gh(['api', `repos/${repo}/issues/${issueId}/comments`, '--paginate']);
-      return JSON.parse(out);
+      try { return JSON.parse(out); } catch { return []; }
     },
 
     commentOnIssue(issueId, { repo, body }) {
@@ -164,6 +165,13 @@ export function create({ reviewToken } = {}) {
         : '**warp-coder**';
       const formatted = `${header}\n\n---\n\n${body}`;
       gh(['issue', 'comment', String(issueId), '--repo', repo, '--body-file', '-'], { input: formatted });
+    },
+
+    addLabels(issueId, labels, { repo }) {
+      for (const label of labels) {
+        try { gh(['label', 'create', label, '--repo', repo, '--color', '0E8A16', '--force']); } catch {}
+      }
+      gh(['issue', 'edit', String(issueId), '--repo', repo, ...labels.flatMap(l => ['--add-label', l])]);
     },
 
     // --- PR discovery ---
@@ -245,8 +253,8 @@ export function create({ reviewToken } = {}) {
 
         for (const { repo, prNumber } of prs) {
           try {
-            const reviews = ghJson(['api', `repos/${repo}/pulls/${prNumber}/reviews`]);
-            if (!reviews) continue;
+            const reviews = this.getReviews(prNumber, { repo }) || [];
+            if (reviews.length === 0) continue;
 
             const actMatch = reviews
               .slice().reverse()

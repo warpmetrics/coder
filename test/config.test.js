@@ -18,6 +18,10 @@ describe('repoName', () => {
   it('handles URL without .git suffix', () => {
     assert.equal(repoName('https://github.com/org/repo'), 'org/repo');
   });
+
+  it('extracts from repo object with url property', () => {
+    assert.equal(repoName({ url: 'git@github.com:warpmetrics/api.git' }), 'warpmetrics/api');
+  });
 });
 
 describe('deriveRepoDirNames', () => {
@@ -40,5 +44,13 @@ describe('deriveRepoDirNames', () => {
   it('handles single repo', () => {
     const names = deriveRepoDirNames(['git@github.com:warpmetrics/frontend.git']);
     assert.deepEqual(names, ['frontend']);
+  });
+
+  it('works with repo objects', () => {
+    const names = deriveRepoDirNames([
+      { url: 'git@github.com:warpmetrics/frontend.git' },
+      { url: 'git@github.com:warpmetrics/api.git' },
+    ]);
+    assert.deepEqual(names, ['frontend', 'api']);
   });
 });

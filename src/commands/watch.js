@@ -1,6 +1,7 @@
 // CLI entry: spinner UI + adapter wiring + poll loop.
 // All orchestration logic lives in runner.js + machine.js.
 
+import { execFileSync } from 'child_process';
 import { loadConfig, repoName } from '../config.js';
 import { createBoard } from '../boards/index.js';
 import { createCodeHost } from '../codehosts/index.js';
@@ -8,6 +9,7 @@ import { implement, revise } from '../executors/claude/index.js';
 import { review } from '../executors/claude/review.js';
 import { merge } from '../executors/codehost.js';
 import { deploy as executeDeploy } from '../executors/deploy.js';
+import { generateChangelogEntry, createChangelogProvider, PUBLIC_PROMPT, PRIVATE_PROMPT } from '../executors/changelog/lib.js';
 import { computeDeployBatch } from '../workflows/plan.js';
 import * as warp from '../client/warp.js';
 import { OUTCOMES, ACTS } from '../names.js';
@@ -55,14 +57,20 @@ function createBoardAdapter(board, codehost, repoNames) {
     async getAllItems() {
       // No refresh — reuses cache from scanNewIssues in same poll cycle.
       const all = [];
-      for (const fn of [board.listTodo, board.listInProgress, board.listInReview, board.listWaiting, board.listDone]) {
-        try { all.push(...await fn.call(board)); } catch {}
+      for (const fn of [board.listTodo, board.listInProgress, board.listInReview, board.listReadyForDeploy, board.listDeploy, board.listBlocked, board.listWaiting, board.listDone]) {
+        if (fn) try { all.push(...await fn.call(board)); } catch {}
       }
       return all;
     },
     async scanAborted() {
       try {
         const items = board.listAborted ? await board.listAborted() : [];
+        return new Set(items.filter(i => i._issueId).map(i => i._issueId));
+      } catch { return new Set(); }
+    },
+    async scanDone() {
+      try {
+        const items = board.listDone ? await board.listDone() : [];
         return new Set(items.filter(i => i._issueId).map(i => i._issueId));
       } catch { return new Set(); }
     },
@@ -82,12 +90,11 @@ function createExecutors() {
 
       if (r.type === 'success') {
         return { ...r, outcomeOpts: { issueNumber: run.issueId },
-          nextActOpts: { ...actOpts, prs: r.prs, issueId: run.issueId, repo: actOpts?.repo || repoNames[0],
-            releaseSteps: r.deployPlan?.releaseSteps || [], releaseDAG: r.deployPlan?.releaseDAG || {} } };
+          nextActOpts: { prs: r.prs, release: r.deployPlan?.release || [] } };
       }
       if (r.type === 'ask_user') {
         return { ...r, outcomeOpts: { issueNumber: run.issueId },
-          nextActOpts: { ...actOpts, issueId: run.issueId, repo: actOpts?.repo || repoNames[0], title: run.title, question: r.question } };
+          nextActOpts: { sessionId: r.sessionId } };
       }
       if (r.type === 'max_turns') {
         const retryCount = (actOpts?.retryCount || 0) + 1;
@@ -97,7 +104,7 @@ function createExecutors() {
           return { type: 'error', error: `Hit max turns ${retryCount} times without completing`, costUsd: r.costUsd, trace: r.trace, outcomeOpts: { issueNumber: run.issueId } };
         }
         return { ...r, outcomeOpts: { issueNumber: run.issueId },
-          nextActOpts: { ...actOpts, sessionId: r.sessionId, retryCount } };
+          nextActOpts: { sessionId: r.sessionId, retryCount } };
       }
       return { ...r, outcomeOpts: { issueNumber: run.issueId } };
     },
@@ -109,15 +116,15 @@ function createExecutors() {
 
       if (r.type === 'approved') {
         return { ...r, outcomeOpts: { prNumber: r.prNumber, reviewCommentCount: r.commentCount },
-          nextActOpts: { ...actOpts, prs: r.prs, issueId: run.issueId } };
+          nextActOpts: { prs: r.prs, release: actOpts?.release } };
       }
       if (r.type === 'changes_requested') {
         return { ...r, outcomeOpts: { prNumber: r.prNumber, reviewCommentCount: r.commentCount },
-          nextActOpts: { ...actOpts, prs: r.prs, issueId: run.issueId, repo: actOpts?.repo || repoNames[0] } };
+          nextActOpts: { prs: r.prs, release: actOpts?.release } };
       }
       if (r.type === 'error') {
         return { ...r, outcomeOpts: { prNumber: r.prNumber, reviewCommentCount: r.commentCount },
-          nextActOpts: actOpts };
+          nextActOpts: { prs: r.prs || actOpts?.prs, release: actOpts?.release } };
       }
       return { ...r, outcomeOpts: { prNumber: r.prNumber, reviewCommentCount: r.commentCount } };
     },
@@ -131,9 +138,10 @@ function createExecutors() {
 
       if (r.type === 'success') {
         return { ...r, outcomeOpts: { prNumber: item._prNumber },
-          nextActOpts: { ...actOpts, prs, issueId: run.issueId, repo: actOpts?.repo || repoNames[0] } };
+          nextActOpts: { prs, release: actOpts?.release } };
       }
-      return { ...r, outcomeOpts: { prNumber: item._prNumber } };
+      return { ...r, outcomeOpts: { prNumber: item._prNumber },
+        nextActOpts: { prs, release: actOpts?.release } };
     },
     async merge(run, { codehost, config, repoNames, log, actOpts }) {
       const prs = actOpts?.prs || [];
@@ -143,49 +151,124 @@ function createExecutors() {
 
       if (r.type === 'success') {
         return { ...r, outcomeOpts: { prNumber: prs[0]?.prNumber },
-          nextActOpts: { ...actOpts, prs, issueId: run.issueId } };
+          nextActOpts: { prs, release: actOpts?.release } };
       }
-      return { ...r, outcomeOpts: { prNumber: prs[0]?.prNumber } };
+      // On partial merge, only retry the failed PRs.
+      const retryPrs = r.failedPrs?.length ? r.failedPrs : prs;
+      return { ...r, outcomeOpts: { prNumber: prs[0]?.prNumber },
+        nextActOpts: { prs: retryPrs, release: actOpts?.release } };
     },
     async await_deploy(run, { config, log, actOpts }) {
       const deployColName = config.board?.columns?.deploy || 'Deploy';
       const currentCol = run.boardItem?.status || run.boardItem?._stateName;
+      const fwd = { prs: actOpts?.prs, release: actOpts?.release };
 
       if (currentCol !== deployColName) {
-        return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: actOpts };
+        return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: fwd };
       }
 
       log(`deploy approved (moved to ${deployColName})`);
       return { type: 'approved', costUsd: null, trace: null, outcomeOpts: {},
-        nextActOpts: actOpts };
+        nextActOpts: fwd };
     },
     async await_reply(run, { codehost, repoNames, log, actOpts }) {
       const primaryRepo = repoNames[0];
       let comments;
-      try { comments = codehost.getIssueComments(run.issueId, { repo: primaryRepo }); } catch { return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: actOpts }; }
+      try { comments = codehost.getIssueComments(run.issueId, { repo: primaryRepo }); } catch { return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: { sessionId: actOpts?.sessionId } }; }
 
       const lastQuestionIdx = comments.findLastIndex(c => c.body?.includes('<!-- warp-coder:question'));
       if (lastQuestionIdx === -1 || lastQuestionIdx === comments.length - 1) {
-        return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: actOpts };
+        return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: { sessionId: actOpts?.sessionId } };
       }
 
       log(`user replied to clarification question`);
-      return { type: 'replied', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: actOpts };
+      return { type: 'replied', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: { sessionId: actOpts?.sessionId } };
     },
     async deploy(run, { codehost, config, repoNames, log, actOpts, deployBatch }) {
       const result = await executeDeploy(actOpts, { codehost, deployBatch, log });
+      const batchedIssues = deployBatch?.issues?.filter(i => i.issueId !== run.issueId) || [];
+      // nextActOpts is serialized to JSON — convert Maps to plain objects.
+      const serializedBatch = batchedIssues.map(i => ({
+        issueId: i.issueId, runId: i.runId, title: i.title, prs: i.prs,
+        groups: i.groups ? Object.fromEntries(i.groups) : {},
+      }));
       return {
         ...result,
         costUsd: null, trace: null,
         outcomeOpts: { stepCount: result.steps?.length },
-        nextActOpts: actOpts,
-        batchedIssues: deployBatch?.issues?.filter(i => i.issueId !== run.issueId) || [],
+        nextActOpts: { prs: actOpts?.prs, release: actOpts?.release, batchedIssues: serializedBatch },
+        batchedIssues,
       };
     },
     async release(run, { codehost, config, repoNames, log, actOpts }) {
-      const releaseSteps = actOpts?.releaseSteps || [];
-      log(`release notes not yet implemented (${releaseSteps.length} repo(s))`);
-      return { type: 'success', costUsd: null, trace: null, outcomeOpts: {} };
+      const batchedIssues = actOpts?.batchedIssues || [];
+
+      // Collect PRs from trigger issue + all batched issues
+      const allPrs = [...(actOpts?.prs || [])];
+      const allIssueLines = [`#${run.issueId}: ${run.title || `Issue #${run.issueId}`}`];
+      for (const issue of batchedIssues) {
+        for (const pr of (issue.prs || [])) {
+          if (!allPrs.some(p => p.repo === pr.repo && p.prNumber === pr.prNumber)) {
+            allPrs.push(pr);
+          }
+        }
+        allIssueLines.push(`#${issue.issueId}: ${issue.title || `Issue #${issue.issueId}`}`);
+      }
+
+      // Gather PR context (files + commits)
+      const prContext = [];
+      for (const { repo, prNumber } of allPrs) {
+        try {
+          const files = codehost.getPRFiles(prNumber, { repo });
+          const commits = codehost.getPRCommits(prNumber, { repo });
+          prContext.push({ repo, prNumber, files, commits });
+        } catch (err) {
+          log(`warning: could not fetch PR ${repo}#${prNumber}: ${err.message}`);
+        }
+      }
+
+      if (prContext.length === 0) {
+        log('no PR context available, skipping changelog');
+        return { type: 'success', costUsd: null, trace: null, outcomeOpts: {}, batchedIssues };
+      }
+
+      // Build changelog prompt context
+      const technicalContext = prContext.map(({ repo, prNumber, files, commits }) => {
+        const commitLines = commits.map(c => `- ${c.messageHeadline || c.message?.split('\n')[0] || ''}`).join('\n');
+        const fileLines = files.map(f => `  ${f.path} (+${f.additions || 0} -${f.deletions || 0})`).join('\n');
+        return `Repo: ${repo}, PR #${prNumber}\nCommits:\n${commitLines}\nFiles:\n${fileLines}`;
+      }).join('\n\n');
+      const context = `Issues:\n${allIssueLines.join('\n')}\n\n---\n\nChanges:\n${technicalContext}`;
+
+      const modelOpts = config.quickModel ? { model: config.quickModel } : {};
+
+      log('generating changelog entries...');
+      const publicEntry = generateChangelogEntry(execFileSync, `${PUBLIC_PROMPT}\n\n---\n\n${context}`, modelOpts);
+      const privateEntry = generateChangelogEntry(execFileSync, `${PRIVATE_PROMPT}\n\n---\n\n${context}`, modelOpts);
+
+      if (!publicEntry && !privateEntry) {
+        log('changelog generation failed');
+        return { type: 'success', costUsd: null, trace: null, outcomeOpts: {}, batchedIssues };
+      }
+
+      // Publish entries
+      const provider = createChangelogProvider(config);
+      if (!provider) {
+        log('no changelog provider configured, skipping publish');
+        return { type: 'success', costUsd: null, trace: null, outcomeOpts: {}, batchedIssues };
+      }
+
+      for (const [label, entry, visibility] of [['public', publicEntry, 'public'], ['private', privateEntry, 'private']]) {
+        if (!entry) continue;
+        try {
+          await provider.post({ title: entry.title, summary: entry.summary, content: entry.content, visibility, tags: entry.tags });
+          log(`${label} changelog entry published`);
+        } catch (err) {
+          log(`${label} changelog entry failed: ${err.message}`);
+        }
+      }
+
+      return { type: 'success', costUsd: null, trace: null, outcomeOpts: {}, batchedIssues };
     },
   };
 }
@@ -194,6 +277,22 @@ function createExecutors() {
 
 function createEffects() {
   return {
+    async 'implement:success'(run, result, { codehost, repoNames, log }) {
+      const primaryRepo = repoNames[0];
+      const release = result.nextActOpts?.release || [];
+      const prs = result.nextActOpts?.prs || [];
+      const repos = release.length > 0
+        ? release.map(s => s.repo)
+        : prs.map(p => p.repo);
+      const labels = [...new Set(repos)].map(r => `deploy:${r.split('/').pop()}`);
+      if (labels.length === 0) return;
+      try {
+        codehost.addLabels(run.issueId, labels, { repo: primaryRepo });
+        log(`tagged: ${labels.join(', ')}`);
+      } catch (err) {
+        log(`warning: could not add labels: ${err.message}`);
+      }
+    },
     async 'implement:error'(run, result, { codehost, repoNames, log }) {
       const primaryRepo = repoNames[0];
       const error = result.error || 'Unknown error';
@@ -235,27 +334,72 @@ function createEffects() {
         });
       } catch {}
     },
-    async 'deploy:success'(run, result, { warp, apiKey, log }) {
-      for (const issue of (result.batchedIssues || [])) {
+    async 'deploy:success'(run, result, { warp, apiKey, board, log }) {
+      const batched = result.batchedIssues || [];
+      if (batched.length === 0) return;
+
+      let boardItemsByIssueId = new Map();
+      if (board) {
         try {
-          // Record DEPLOY_APPROVED + DEPLOYED on the Deploy group
-          if (issue.parentEntityId) {
-            await warp.recordIssueOutcome(apiKey, { runId: issue.parentEntityId, name: OUTCOMES.DEPLOY_APPROVED });
-            await warp.recordIssueOutcome(apiKey, { runId: issue.parentEntityId, name: OUTCOMES.DEPLOYED });
+          const items = await board.getAllItems();
+          for (const item of items) {
+            if (item._issueId) boardItemsByIssueId.set(item._issueId, item);
           }
-          // Record DEPLOYED on the Issue Run
-          const { outcomeId } = await warp.recordIssueOutcome(apiKey, { runId: issue.runId, name: OUTCOMES.DEPLOYED });
-          // Emit RELEASE act with this issue's own release data
-          if (outcomeId) {
-            await warp.emitAct(apiKey, {
-              outcomeId,
-              name: ACTS.RELEASE,
-              opts: { prs: issue.prs, issueId: issue.issueId, releaseSteps: issue.releaseSteps, releaseDAG: issue.releaseDAG },
-            });
+        } catch {}
+      }
+
+      for (const issue of batched) {
+        try {
+          // Record Deploy phase outcomes
+          const deployGroup = issue.groups.get('Deploy');
+          if (deployGroup) {
+            await warp.recordIssueOutcome(apiKey, { runId: deployGroup, name: OUTCOMES.DEPLOY_APPROVED });
+            await warp.recordIssueOutcome(apiKey, { runId: deployGroup, name: OUTCOMES.DEPLOYED });
           }
-          log(`advanced batched issue ${issue.issueId} to RELEASE`);
+          await warp.recordIssueOutcome(apiKey, { runId: issue.runId, name: OUTCOMES.DEPLOYED });
+          const boardItem = boardItemsByIssueId.get(issue.issueId);
+          if (board && boardItem) {
+            await board.syncState(boardItem, 'deploy');
+          }
+          log(`batched issue #${issue.issueId} deployed`);
         } catch (err) {
           log(`warning: failed to advance batched issue ${issue.issueId}: ${err.message}`);
+        }
+      }
+    },
+    async 'release:success'(run, result, { warp, apiKey, board, log }) {
+      const batched = result.batchedIssues || [];
+      if (batched.length === 0) return;
+
+      // Look up board items for batched issues (not serializable in actOpts).
+      let boardItemsByIssueId = new Map();
+      if (board) {
+        try {
+          const items = await board.getAllItems();
+          for (const item of items) {
+            if (item._issueId) boardItemsByIssueId.set(item._issueId, item);
+          }
+        } catch {}
+      }
+
+      for (const issue of batched) {
+        try {
+          // Groups come as plain object from serialized actOpts.
+          const groups = issue.groups || {};
+          const releaseGroup = groups['Release'];
+          if (releaseGroup) {
+            await warp.recordIssueOutcome(apiKey, { runId: releaseGroup, name: OUTCOMES.RELEASING });
+            await warp.recordIssueOutcome(apiKey, { runId: releaseGroup, name: OUTCOMES.RELEASED });
+          }
+          await warp.recordIssueOutcome(apiKey, { runId: issue.runId, name: OUTCOMES.RELEASED });
+          // Sync board to done
+          const boardItem = boardItemsByIssueId.get(issue.issueId);
+          if (board && boardItem) {
+            await board.syncState(boardItem, 'done');
+          }
+          log(`batched issue #${issue.issueId} released`);
+        } catch (err) {
+          log(`warning: failed to release batched issue ${issue.issueId}: ${err.message}`);
         }
       }
     },
@@ -268,7 +412,7 @@ export async function watch() {
   const config = loadConfig();
   const rawBoard = createBoard(config);
   const codehost = createCodeHost(config);
-  const repoNames = config.repos.map(repoName);
+  const repoNames = config.repos.map(r => repoName(r));
   const pollInterval = (config.pollInterval || 30) * 1000;
   const apiKey = config.warpmetricsApiKey;
 
@@ -288,10 +432,10 @@ export async function watch() {
         .map(r => ({
           issueId: r.issueId,
           runId: r.id,
-          parentEntityId: r.parentEntityId,
+          title: r.title,
+          groups: r.groups || new Map(),
           prs: r.pendingAct?.opts?.prs || [],
-          releaseSteps: r.pendingAct?.opts?.releaseSteps || [],
-          releaseDAG: r.pendingAct?.opts?.releaseDAG || {},
+          release: r.pendingAct?.opts?.release || [],
         }));
       return computeDeployBatch(run.issueId, awaiting);
     },

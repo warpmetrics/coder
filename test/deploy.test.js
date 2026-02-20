@@ -6,8 +6,8 @@ import { deploy } from '../src/executors/deploy.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeActOpts({ releaseSteps = [], releaseDAG = {}, ...rest } = {}) {
-  return { issueId: 42, prs: [], releaseSteps, releaseDAG, ...rest };
+function makeActOpts({ release = [], ...rest } = {}) {
+  return { prs: [], release, ...rest };
 }
 
 function makeBatch(issues) {
@@ -61,8 +61,7 @@ describe('deploy executor', () => {
     const exec = makeExec();
     const fs = makeFsMock();
     const actOpts = makeActOpts({
-      releaseSteps: [{ repo: 'org/api', type: 'service', script: 'npm run deploy:prod' }],
-      releaseDAG: { 'org/api': [] },
+      release: [{ repo: 'org/api', command: 'npm run deploy:prod', dependsOn: [] }],
     });
 
     const result = await deploy(actOpts, {
@@ -78,9 +77,9 @@ describe('deploy executor', () => {
     assert.equal(codehost._cloneCalls.length, 1);
     assert.ok(codehost._cloneCalls[0].url.includes('org/api'));
 
-    // Should have run the script
-    const scriptCall = exec._calls.find(c => c.cmd === 'npm run deploy:prod');
-    assert.ok(scriptCall, 'should run deploy script');
+    // Should have run the command
+    const cmdCall = exec._calls.find(c => c.cmd === 'npm run deploy:prod');
+    assert.ok(cmdCall, 'should run deploy command');
   });
 
   it('multiple steps in DAG order — clones once per repo, runs in level order', async () => {
@@ -89,16 +88,11 @@ describe('deploy executor', () => {
     const exec = makeExec();
     const fs = makeFsMock();
     const actOpts = makeActOpts({
-      releaseSteps: [
-        { repo: 'org/warp', type: 'package', script: 'npm run release:patch' },
-        { repo: 'org/api', type: 'service', script: 'npm run deploy:prod' },
-        { repo: 'org/frontend', type: 'service', script: 'npm run deploy:prod' },
+      release: [
+        { repo: 'org/warp', command: 'npm run release:patch', dependsOn: [] },
+        { repo: 'org/api', command: 'npm run deploy:prod', dependsOn: ['org/warp'] },
+        { repo: 'org/frontend', command: 'npm run deploy:prod', dependsOn: ['org/warp'] },
       ],
-      releaseDAG: {
-        'org/warp': [],
-        'org/api': ['org/warp'],
-        'org/frontend': ['org/warp'],
-      },
     });
 
     const result = await deploy(actOpts, {
@@ -135,8 +129,7 @@ describe('deploy executor', () => {
     const exec = makeExec();
     const fs = makeFsMock();
     const actOpts = makeActOpts({
-      releaseSteps: [{ repo: 'org/api', type: 'service', script: 'npm run deploy:prod' }],
-      releaseDAG: { 'org/api': [] },
+      release: [{ repo: 'org/api', command: 'npm run deploy:prod', dependsOn: [] }],
     });
 
     const result = await deploy(actOpts, {
@@ -160,8 +153,7 @@ describe('deploy executor', () => {
     const fs = makeFsMock();
 
     const actOpts = makeActOpts({
-      releaseSteps: [{ repo: 'org/api', type: 'service', script: 'npm run deploy:prod' }],
-      releaseDAG: { 'org/api': [] },
+      release: [{ repo: 'org/api', command: 'npm run deploy:prod', dependsOn: [] }],
     });
 
     const result = await deploy(actOpts, {
@@ -179,7 +171,7 @@ describe('deploy executor', () => {
   it('no release steps returns error', async () => {
     const logs = [];
     const codehost = makeCodehost();
-    const actOpts = makeActOpts({ releaseSteps: [], releaseDAG: {} });
+    const actOpts = makeActOpts({ release: [] });
 
     const result = await deploy(actOpts, {
       codehost, deployBatch: null, exec: makeExec(), fs: makeFsMock(),
@@ -196,8 +188,7 @@ describe('deploy executor', () => {
     const exec = makeExec();
     const fs = makeFsMock();
     const actOpts = makeActOpts({
-      releaseSteps: [{ repo: 'org/api', type: 'service', script: 'npm run deploy:prod' }],
-      releaseDAG: { 'org/api': [] },
+      release: [{ repo: 'org/api', command: 'npm run deploy:prod', dependsOn: [] }],
     });
 
     // deployBatch with empty issues array
@@ -216,14 +207,10 @@ describe('deploy executor', () => {
     const logs = [];
     const codehost = makeCodehost();
     const actOpts = makeActOpts({
-      releaseSteps: [
-        { repo: 'org/a', type: 'service', script: 'npm run deploy:prod' },
-        { repo: 'org/b', type: 'service', script: 'npm run deploy:prod' },
+      release: [
+        { repo: 'org/a', command: 'npm run deploy:prod', dependsOn: ['org/b'] },
+        { repo: 'org/b', command: 'npm run deploy:prod', dependsOn: ['org/a'] },
       ],
-      releaseDAG: {
-        'org/a': ['org/b'],
-        'org/b': ['org/a'],
-      },
     });
 
     const result = await deploy(actOpts, {
@@ -244,16 +231,14 @@ describe('deploy executor', () => {
     const batch = makeBatch([
       {
         issueId: 42, runId: 'r1',
-        releaseSteps: [{ repo: 'org/api', type: 'service', script: 'npm run deploy:prod' }],
-        releaseDAG: { 'org/api': [] },
+        release: [{ repo: 'org/api', command: 'npm run deploy:prod', dependsOn: [] }],
       },
       {
         issueId: 99, runId: 'r2',
-        releaseSteps: [
-          { repo: 'org/warp', type: 'package', script: 'npm run release:patch' },
-          { repo: 'org/api', type: 'service', script: 'npm run deploy:prod' },
+        release: [
+          { repo: 'org/warp', command: 'npm run release:patch', dependsOn: [] },
+          { repo: 'org/api', command: 'npm run deploy:prod', dependsOn: ['org/warp'] },
         ],
-        releaseDAG: { 'org/warp': [], 'org/api': ['org/warp'] },
       },
     ]);
 
@@ -275,14 +260,62 @@ describe('deploy executor', () => {
     assert.equal(apiStep.level, 1);
   });
 
+  it('repos with same basename get unique directories', async () => {
+    const logs = [];
+    const codehost = makeCodehost();
+    const exec = makeExec();
+    const fs = makeFsMock();
+    const actOpts = makeActOpts({
+      release: [
+        { repo: 'org-a/api', command: 'npm run deploy:prod', dependsOn: [] },
+        { repo: 'org-b/api', command: 'npm run deploy:prod', dependsOn: [] },
+      ],
+    });
+
+    const result = await deploy(actOpts, {
+      codehost, deployBatch: null, exec, fs,
+      log: msg => logs.push(msg),
+    });
+
+    assert.equal(result.type, 'success');
+    assert.equal(codehost._cloneCalls.length, 2);
+
+    // Destinations must be different (deriveRepoDirNames handles collision)
+    const dests = codehost._cloneCalls.map(c => c.dest);
+    assert.notEqual(dests[0], dests[1], 'clone destinations should be unique');
+  });
+
+  it('workdir uses unique UUID suffix', async () => {
+    const logs = [];
+    const codehost = makeCodehost();
+    const exec = makeExec();
+    const fs = makeFsMock();
+    const actOpts = makeActOpts({
+      release: [{ repo: 'org/api', command: 'npm run deploy:prod', dependsOn: [] }],
+    });
+
+    // Run twice and verify workdirs differ
+    const result1 = await deploy(actOpts, { codehost, deployBatch: null, exec, fs, log: msg => logs.push(msg) });
+    const result2 = await deploy(actOpts, { codehost, deployBatch: null, exec, fs, log: msg => logs.push(msg) });
+
+    assert.equal(result1.type, 'success');
+    assert.equal(result2.type, 'success');
+
+    // The mkdirSync calls should have different paths (due to UUID)
+    const mkdirCalls = fs._calls.filter(c => c.name === 'mkdirSync');
+    assert.ok(mkdirCalls.length >= 2, 'should have at least 2 mkdirSync calls');
+    const paths = mkdirCalls.map(c => c.args[0]);
+    assert.ok(paths[0].includes('deploy-'), 'workdir should include deploy- prefix');
+    assert.notEqual(paths[0], paths[paths.length - 1], 'concurrent deploys should use different workdirs');
+  });
+
   it('step without script is skipped', async () => {
     const logs = [];
     const codehost = makeCodehost();
     const exec = makeExec();
     const fs = makeFsMock();
     const actOpts = makeActOpts({
-      releaseSteps: [{ repo: 'org/lib', type: 'unknown', script: null }],
-      releaseDAG: { 'org/lib': [] },
+      release: [{ repo: 'org/lib', command: null, dependsOn: [] }],
     });
 
     const result = await deploy(actOpts, {
@@ -292,6 +325,6 @@ describe('deploy executor', () => {
 
     assert.equal(result.type, 'success');
     assert.equal(exec._calls.length, 0, 'should not run any scripts');
-    assert.ok(logs.some(l => l.includes('no script')));
+    assert.ok(logs.some(l => l.includes('no command')));
   });
 });

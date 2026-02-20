@@ -1,7 +1,8 @@
 // Pure release planning functions — no side effects.
 
 /**
- * Merge release DAGs from multiple plans into a single plan.
+ * Merge release plans from multiple issues into a single plan.
+ * Each plan has a `release` array: [{ repo, command, dependsOn }]
  */
 export function mergeDAGs(plans) {
   const allSteps = new Map(); // repo → step info (merged)
@@ -11,20 +12,17 @@ export function mergeDAGs(plans) {
   for (const plan of plans) {
     const issueNum = plan.issue?.opts?.issue ?? plan.issueId;
 
-    for (const step of (plan.releaseSteps || [])) {
+    for (const step of (plan.release || [])) {
       if (!allSteps.has(step.repo)) {
         allSteps.set(step.repo, { ...step });
         dag[step.repo] = [];
         issuesByRepo.set(step.repo, new Set());
       }
       if (issueNum) issuesByRepo.get(step.repo).add(issueNum);
-    }
 
-    for (const [repo, deps] of Object.entries(plan.releaseDAG || {})) {
-      if (!dag[repo]) dag[repo] = [];
-      for (const dep of deps) {
-        if (!dag[repo].includes(dep)) {
-          dag[repo].push(dep);
+      for (const dep of (step.dependsOn || [])) {
+        if (!dag[step.repo].includes(dep)) {
+          dag[step.repo].push(dep);
         }
       }
     }
@@ -60,7 +58,7 @@ export function buildSteps(ordered, merged) {
 
     steps.push({
       repo,
-      script: info?.script,
+      command: info?.command,
       issues: issues ? [...issues] : [],
       level,
       dependsOn: (merged.dag[repo] || []).filter(d => merged.steps.has(d)),
@@ -81,15 +79,17 @@ export function computeDeployBatch(triggerIssueId, awaitingIssues) {
   const batch = new Map(); // issueId → issue
   batch.set(trigger.issueId, trigger);
 
-  const repos = new Set((trigger.releaseSteps || []).map(s => s.repo));
+  const repos = new Set((trigger.release || []).map(s => s.repo));
 
-  // Fixed-point loop: expand batch by repo overlap
+  // Fixed-point loop: expand batch by repo overlap (capped to prevent runaway)
   let changed = true;
-  while (changed) {
+  let iterations = 0;
+  const maxIterations = awaitingIssues.length + 1;
+  while (changed && iterations++ < maxIterations) {
     changed = false;
     for (const issue of awaitingIssues) {
       if (batch.has(issue.issueId)) continue;
-      const issueRepos = (issue.releaseSteps || []).map(s => s.repo);
+      const issueRepos = (issue.release || []).map(s => s.repo);
       if (issueRepos.some(r => repos.has(r))) {
         batch.set(issue.issueId, issue);
         for (const r of issueRepos) repos.add(r);

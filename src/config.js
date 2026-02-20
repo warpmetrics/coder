@@ -5,7 +5,8 @@ export const CONFIG_DIR = '.warp-coder';
 const CONFIG_FILE = 'config.json';
 const ENV_FILE = '.env';
 
-export function repoName(url) {
+export function repoName(urlOrRepo) {
+  const url = typeof urlOrRepo === 'object' ? urlOrRepo.url : urlOrRepo;
   return url.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');
 }
 
@@ -14,10 +15,10 @@ export function repoName(url) {
  * e.g. ["org/api", "other/api"] → ["org-api", "other-api"]
  */
 export function deriveRepoDirNames(repos) {
-  const names = repos.map(url => basename(repoName(url)));
+  const names = repos.map(r => basename(repoName(r)));
   const hasDuplicates = new Set(names).size !== names.length;
   if (!hasDuplicates) return names;
-  return repos.map(url => repoName(url).replace(/\//g, '-'));
+  return repos.map(r => repoName(r).replace(/\//g, '-'));
 }
 
 function loadEnv(dir) {
@@ -52,6 +53,7 @@ export function loadConfig(cwd = process.cwd()) {
   if (env.WARP_CODER_WARPMETRICS_KEY) raw.warpmetricsApiKey = env.WARP_CODER_WARPMETRICS_KEY;
   if (env.WARP_CODER_LINEAR_KEY && raw.board) raw.board.apiKey = env.WARP_CODER_LINEAR_KEY;
   if (env.WARP_CODER_REVIEW_TOKEN) raw.reviewToken = env.WARP_CODER_REVIEW_TOKEN;
+  if (env.WARP_CODER_CHANGELOG_TOKEN && raw.changelog) raw.changelog.token = env.WARP_CODER_CHANGELOG_TOKEN;
 
   // Warn if secrets are missing
   if (!raw.warpmetricsApiKey) {
@@ -61,12 +63,21 @@ export function loadConfig(cwd = process.cwd()) {
     console.warn('warning: WARP_CODER_LINEAR_KEY not set in .env — Linear board adapter will fail');
   }
 
-  // Normalize repos: support both "repo" (string) and "repos" (array)
+  // Normalize repos: support "repo" (string/object) and "repos" (array)
   if (!raw.repos && raw.repo) {
     raw.repos = [raw.repo];
   }
   if (!raw.repos?.length) {
     throw new Error('Config must specify "repo" or "repos".');
+  }
+  // Normalize to objects: string URL → { url }
+  raw.repos = raw.repos.map(r => typeof r === 'string' ? { url: r } : r);
+
+  // Derive deploy config from repos
+  raw.deploy = {};
+  for (const repo of raw.repos) {
+    const name = repoName(repo);
+    if (repo.deploy) raw.deploy[name] = { command: repo.deploy };
   }
 
   return raw;

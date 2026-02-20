@@ -2,10 +2,12 @@
 // topo-sorts, and runs deploy scripts in dependency order.
 
 import { execSync as defaultExecSync } from 'child_process';
+import crypto from 'crypto';
 import { existsSync as defaultExistsSync, rmSync as defaultRmSync, mkdirSync as defaultMkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { mergeDAGs, topoSort, buildSteps } from '../workflows/plan.js';
+import { deriveRepoDirNames } from '../config.js';
 
 /**
  * Build plan inputs from actOpts and optional deployBatch.
@@ -15,14 +17,12 @@ function buildPlans(actOpts, deployBatch) {
   if (deployBatch?.issues?.length) {
     return deployBatch.issues.map(issue => ({
       issueId: issue.issueId,
-      releaseSteps: issue.releaseSteps || [],
-      releaseDAG: issue.releaseDAG || {},
+      release: issue.release || [],
     }));
   }
   return [{
     issueId: actOpts?.issueId,
-    releaseSteps: actOpts?.releaseSteps || [],
-    releaseDAG: actOpts?.releaseDAG || {},
+    release: actOpts?.release || [],
   }];
 }
 
@@ -37,17 +37,17 @@ export async function deploy(actOpts, { codehost, deployBatch, log, exec: execSy
 
   function runStep(step, clonedRepos) {
     const short = step.repo.split('/').pop();
-    if (!step.script) {
-      log(`[${short}] no script — skipping`);
+    if (!step.command) {
+      log(`[${short}] no command — skipping`);
       return { ok: true };
     }
     const repoDir = clonedRepos.get(step.repo);
     if (!repoDir) return { error: `${step.repo} not cloned` };
 
-    log(`[${short}] running: ${step.script}`);
+    log(`[${short}] running: ${step.command}`);
     const start = Date.now();
     try {
-      execSync(step.script, { cwd: repoDir, stdio: 'pipe', timeout: 10 * 60 * 1000 });
+      execSync(step.command, { cwd: repoDir, stdio: 'pipe', timeout: 10 * 60 * 1000 });
       log(`[${short}] done (${Math.round((Date.now() - start) / 1000)}s)`);
       return { ok: true };
     } catch (err) {
@@ -67,18 +67,23 @@ export async function deploy(actOpts, { codehost, deployBatch, log, exec: execSy
   // 2. Log the plan
   for (const step of steps) {
     const short = step.repo.split('/').pop();
-    log(`  step: ${short} — ${step.script || 'no script'}`);
+    log(`  step: ${short} — ${step.command || 'no command'}`);
   }
 
   // 3. Clone repos
-  const workdir = join(tmpdir(), 'warp-coder', 'deploy');
-  if (existsSync(workdir)) rmSync(workdir, { recursive: true, force: true });
+  const uid = crypto.randomUUID().slice(0, 8);
+  const workdir = join(tmpdir(), 'warp-coder', `deploy-${uid}`);
   mkdirSync(workdir, { recursive: true });
+
+  // Derive unique directory names to avoid collisions (e.g. org-a/api vs org-b/api).
+  const repoUrls = [...new Set(steps.map(s => s.repo))];
+  const dirNames = deriveRepoDirNames(repoUrls.map(r => ({ url: r })));
+  const repoDirMap = new Map(repoUrls.map((r, i) => [r, dirNames[i]]));
 
   const clonedRepos = new Map();
   for (const step of steps) {
     if (clonedRepos.has(step.repo)) continue;
-    const short = step.repo.split('/').pop();
+    const short = repoDirMap.get(step.repo) || step.repo.split('/').pop();
     const dest = join(workdir, short);
     log(`cloning ${step.repo}...`);
     try {

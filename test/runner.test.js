@@ -56,14 +56,21 @@ function createMocks() {
 }
 
 function makeRun(overrides = {}) {
+  // Build groups map from parentEntityId/Label if provided (backwards compat for tests).
+  let groups = overrides.groups || new Map();
+  if (!(groups instanceof Map)) groups = new Map(Object.entries(groups));
+  if (overrides.parentEntityId && overrides.parentEntityLabel) {
+    groups.set(overrides.parentEntityLabel, overrides.parentEntityId);
+  }
   return {
     id: 'run-1', issueId: 42, repo: 'owner/repo', title: 'Test issue',
     latestOutcome: OUTCOMES.STARTED, outcomes: [],
     boardItem: { id: 'bi1', _issueId: 42 },
     pendingAct: { id: 'act-1', name: ACTS.BUILD, opts: { issueId: 42, repo: 'owner/repo', title: 'Test issue' } },
-    parentEntityId: null,
-    parentEntityLabel: null,
+    groups,
     ...overrides,
+    // Ensure groups is always the computed map, not the override.
+    groups,
   };
 }
 
@@ -115,7 +122,7 @@ describe('phase group auto-transition', () => {
     const m = createMocks();
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.PR_CREATED,
-      pendingAct: { id: 'act-2', name: ACTS.REVIEW, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-2', name: ACTS.REVIEW, opts: { prs: [], release: [] } },
     }));
 
     const group = m.calls.find(c => c.name === 'createGroup');
@@ -129,7 +136,7 @@ describe('phase group auto-transition', () => {
     const m = createMocks();
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.MERGED,
-      pendingAct: { id: 'act-5', name: ACTS.DEPLOY, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-5', name: ACTS.DEPLOY, opts: { prs: [], release: [] } },
     }));
 
     const group = m.calls.find(c => c.name === 'createGroup');
@@ -143,7 +150,7 @@ describe('phase group auto-transition', () => {
     const m = createMocks();
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.DEPLOYED,
-      pendingAct: { id: 'act-7', name: ACTS.RELEASE, opts: { repos: ['owner/repo'], issueId: 42 } },
+      pendingAct: { id: 'act-7', name: ACTS.RELEASE, opts: { prs: [], release: [] } },
     }));
 
     const group = m.calls.find(c => c.name === 'createGroup');
@@ -164,10 +171,10 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.implement = async () => ({
       type: 'success', costUsd: 0.5, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [{ repo: 'owner/repo', prNumber: 1 }], issueId: 42 },
+      nextActOpts: { prs: [{ repo: 'owner/repo', prNumber: 1 }], release: [] },
     });
     await runSingle(m, makeRun({
-      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: { issueId: 42, repo: 'owner/repo' } },
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
       parentEntityId: 'build-group-1',
       parentEntityLabel: 'Build',
     }));
@@ -193,10 +200,10 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.implement = async () => ({
       type: 'max_turns', sessionId: 'sess1', costUsd: 0.5, trace: null, outcomeOpts: {},
-      nextActOpts: { issueId: 42, repo: 'owner/repo', sessionId: 'sess1', retryCount: 1 },
+      nextActOpts: { sessionId: 'sess1', retryCount: 1 },
     });
     await runSingle(m, makeRun({
-      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: { issueId: 42, repo: 'owner/repo' } },
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
       parentEntityId: 'build-group-1',
       parentEntityLabel: 'Build',
     }));
@@ -222,11 +229,11 @@ describe('processRun (act-driven)', () => {
     let effectCalled = false;
     m.execute.implement = async () => ({
       type: 'ask_user', question: 'What?', costUsd: 0.1, trace: null, outcomeOpts: {},
-      nextActOpts: { issueId: 42, repo: 'owner/repo', title: 'Test', question: 'What?' },
+      nextActOpts: {},
     });
     m.effects['implement:ask_user'] = async () => { effectCalled = true; };
     await runSingle(m, makeRun({
-      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: { issueId: 42, repo: 'owner/repo' } },
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
       parentEntityId: 'build-group-1',
       parentEntityLabel: 'Build',
     }));
@@ -242,7 +249,7 @@ describe('processRun (act-driven)', () => {
       type: 'error', error: 'boom', costUsd: null, trace: null, outcomeOpts: {},
     });
     await runSingle(m, makeRun({
-      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: { issueId: 42 } },
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
       parentEntityId: 'build-group-1',
       parentEntityLabel: 'Build',
     }));
@@ -263,11 +270,11 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.review = async () => ({
       type: 'approved', costUsd: 0.2, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.REVIEWING,
-      pendingAct: { id: 'act-2', name: ACTS.EVALUATE, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-2', name: ACTS.EVALUATE, opts: { prs: [], release: [] } },
       parentEntityId: 'review-group-1',
       parentEntityLabel: 'Review',
     }));
@@ -285,11 +292,11 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.review = async () => ({
       type: 'changes_requested', costUsd: 0.2, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42, repo: 'owner/repo' },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.REVIEWING,
-      pendingAct: { id: 'act-2', name: ACTS.EVALUATE, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-2', name: ACTS.EVALUATE, opts: { prs: [], release: [] } },
       parentEntityId: 'review-group-1',
       parentEntityLabel: 'Review',
     }));
@@ -302,11 +309,11 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.review = async () => ({
       type: 'error', error: 'review failed', costUsd: null, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.REVIEWING,
-      pendingAct: { id: 'act-2', name: ACTS.EVALUATE, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-2', name: ACTS.EVALUATE, opts: { prs: [], release: [] } },
       parentEntityId: 'review-group-1',
       parentEntityLabel: 'Review',
     }));
@@ -323,11 +330,11 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.await_reply = async () => ({
       type: 'replied', costUsd: null, trace: null, outcomeOpts: {},
-      nextActOpts: { issueId: 42, repo: 'owner/repo', title: 'Test' },
+      nextActOpts: {},
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.NEEDS_CLARIFICATION,
-      pendingAct: { id: 'act-3', name: ACTS.AWAIT_REPLY, opts: { issueId: 42, repo: 'owner/repo', title: 'Test' } },
+      pendingAct: { id: 'act-3', name: ACTS.AWAIT_REPLY, opts: {} },
       parentEntityId: 'build-group-1',
       parentEntityLabel: 'Build',
     }));
@@ -345,11 +352,11 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.revise = async () => ({
       type: 'success', costUsd: 0.3, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42, repo: 'owner/repo' },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.CHANGES_REQUESTED,
-      pendingAct: { id: 'act-4', name: ACTS.REVISE, opts: { prs: [], issueId: 42, repo: 'owner/repo' } },
+      pendingAct: { id: 'act-4', name: ACTS.REVISE, opts: { prs: [], release: [] } },
       parentEntityId: 'review-group-1',
       parentEntityLabel: 'Review',
     }));
@@ -367,7 +374,7 @@ describe('processRun (act-driven)', () => {
     m.effects['revise:error'] = async () => { effectCalled = true; };
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.CHANGES_REQUESTED,
-      pendingAct: { id: 'act-4', name: ACTS.REVISE, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-4', name: ACTS.REVISE, opts: { prs: [], release: [] } },
       parentEntityId: 'review-group-1',
       parentEntityLabel: 'Review',
     }));
@@ -382,12 +389,12 @@ describe('processRun (act-driven)', () => {
     let effectCalled = false;
     m.execute.merge = async () => ({
       type: 'success', costUsd: null, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     m.effects['merge:success'] = async () => { effectCalled = true; };
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.APPROVED,
-      pendingAct: { id: 'act-5', name: ACTS.MERGE, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-5', name: ACTS.MERGE, opts: { prs: [], release: [] } },
       parentEntityId: 'review-group-1',
       parentEntityLabel: 'Review',
     }));
@@ -414,7 +421,7 @@ describe('processRun (act-driven)', () => {
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.APPROVED,
-      pendingAct: { id: 'act-5', name: ACTS.MERGE, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-5', name: ACTS.MERGE, opts: { prs: [], release: [] } },
       parentEntityId: 'review-group-1',
       parentEntityLabel: 'Review',
     }));
@@ -427,11 +434,11 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.await_deploy = async () => ({
       type: 'approved', costUsd: null, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.AWAITING_DEPLOY,
-      pendingAct: { id: 'act-6', name: ACTS.AWAIT_DEPLOY, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-6', name: ACTS.AWAIT_DEPLOY, opts: { prs: [], release: [] } },
       parentEntityId: 'deploy-group-1',
       parentEntityLabel: 'Deploy',
     }));
@@ -444,11 +451,11 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.deploy = async () => ({
       type: 'success', costUsd: null, trace: null, outcomeOpts: {},
-      nextActOpts: { repos: ['owner/repo'], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.DEPLOY_APPROVED,
-      pendingAct: { id: 'act-7', name: ACTS.RUN_DEPLOY, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-7', name: ACTS.RUN_DEPLOY, opts: { prs: [], release: [] } },
       parentEntityId: 'deploy-group-1',
       parentEntityLabel: 'Deploy',
     }));
@@ -529,7 +536,7 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.implement = async () => ({
       type: 'success', costUsd: 0.1, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
@@ -548,7 +555,7 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.implement = async () => ({
       type: 'success', costUsd: 0, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       pendingAct: { id: 'my-act-123', name: ACTS.IMPLEMENT, opts: {} },
@@ -565,7 +572,7 @@ describe('processRun (act-driven)', () => {
     const m = createMocks();
     m.execute.implement = async () => ({
       type: 'success', costUsd: 0, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     await runSingle(m, makeRun({
       pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
@@ -642,7 +649,7 @@ describe('poll', () => {
     m.execute.deploy = async (run, ctx) => {
       receivedBatch = ctx.deployBatch;
       return { type: 'success', costUsd: null, trace: null, outcomeOpts: {},
-        nextActOpts: { prs: [], issueId: 42 } };
+        nextActOpts: { prs: [], release: [] } };
     };
     const findDeployBatch = async (run, act) => {
       batchCalled = true;
@@ -653,7 +660,7 @@ describe('poll', () => {
     };
     m.warp.findOpenIssueRuns = async () => [makeRun({
       latestOutcome: OUTCOMES.DEPLOY_APPROVED,
-      pendingAct: { id: 'act-7', name: ACTS.RUN_DEPLOY, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-7', name: ACTS.RUN_DEPLOY, opts: { prs: [], release: [] } },
       parentEntityId: 'deploy-group-1',
       parentEntityLabel: 'Deploy',
     })];
@@ -671,7 +678,7 @@ describe('poll', () => {
     let batchCalled = false;
     m.execute.implement = async () => ({
       type: 'success', costUsd: 0, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
     });
     const findDeployBatch = async () => { batchCalled = true; return null; };
     m.warp.findOpenIssueRuns = async () => [makeRun({
@@ -691,7 +698,7 @@ describe('poll', () => {
     let effectBatchedIssues = null;
     m.execute.deploy = async () => ({
       type: 'success', costUsd: null, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [], issueId: 42 },
+      nextActOpts: { prs: [], release: [] },
       batchedIssues: [{ issueId: 99, runId: 'run-2', parentEntityId: 'deploy-group-2' }],
     });
     m.effects['deploy:success'] = async (run, result) => {
@@ -699,7 +706,7 @@ describe('poll', () => {
     };
     await runSingle(m, makeRun({
       latestOutcome: OUTCOMES.DEPLOY_APPROVED,
-      pendingAct: { id: 'act-7', name: ACTS.RUN_DEPLOY, opts: { prs: [], issueId: 42 } },
+      pendingAct: { id: 'act-7', name: ACTS.RUN_DEPLOY, opts: { prs: [], release: [] } },
       parentEntityId: 'deploy-group-1',
       parentEntityLabel: 'Deploy',
     }));
@@ -707,6 +714,101 @@ describe('poll', () => {
     assert.ok(effectBatchedIssues, 'effect should receive batchedIssues');
     assert.equal(effectBatchedIssues.length, 1);
     assert.equal(effectBatchedIssues[0].issueId, 99);
+  });
+
+  it('latestOutcome updates even without board', async () => {
+    const m = createMocks();
+    m.execute.implement = async () => ({
+      type: 'success', costUsd: 0.1, trace: null, outcomeOpts: {},
+      nextActOpts: { prs: [], release: [] },
+    });
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
+      parentEntityId: 'build-group-1',
+      parentEntityLabel: 'Build',
+    })];
+    const runner = createRunner({ ...m, board: null, log: m.log });
+
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    // latestOutcome should still be set even without board
+    // Verified by checking the cross-phase act was emitted (REVIEW),
+    // which only happens if latestOutcome is properly tracked
+    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    assert.ok(emitAct, 'should emit next act even without board');
+  });
+
+  it('effect receives board in context', async () => {
+    const m = createMocks();
+    let effectCtx = null;
+    m.execute.deploy = async () => ({
+      type: 'success', costUsd: null, trace: null, outcomeOpts: {},
+      nextActOpts: { prs: [], release: [] },
+    });
+    m.effects['deploy:success'] = async (run, result, ctx) => {
+      effectCtx = ctx;
+    };
+    await runSingle(m, makeRun({
+      latestOutcome: OUTCOMES.DEPLOY_APPROVED,
+      pendingAct: { id: 'act-7', name: ACTS.RUN_DEPLOY, opts: { prs: [], release: [] } },
+      parentEntityId: 'deploy-group-1',
+      parentEntityLabel: 'Deploy',
+    }));
+
+    assert.ok(effectCtx, 'effect should be called');
+    assert.ok('board' in effectCtx, 'effect context should include board');
+    assert.ok('warp' in effectCtx, 'effect context should include warp');
+    assert.ok('apiKey' in effectCtx, 'effect context should include apiKey');
+  });
+
+  it('waiting acts are capped to prevent flooding', async () => {
+    const m = createMocks();
+    let callCount = 0;
+    m.execute.await_deploy = async () => {
+      callCount++;
+      return { type: 'waiting' };
+    };
+
+    // Create 15 waiting runs (more than default cap of max(1*5, 10) = 10)
+    const runs = [];
+    for (let i = 0; i < 15; i++) {
+      runs.push(makeRun({
+        id: `run-${i}`, issueId: 100 + i,
+        latestOutcome: OUTCOMES.AWAITING_DEPLOY,
+        pendingAct: { id: `act-${i}`, name: ACTS.AWAIT_DEPLOY, opts: { prs: [], release: [] } },
+        parentEntityId: `deploy-group-${i}`,
+        parentEntityLabel: 'Deploy',
+      }));
+    }
+
+    m.warp.findOpenIssueRuns = async () => runs;
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    // With concurrency=1, maxWaiting = max(1*5, 10) = 10, so at most 10 should be processed
+    assert.ok(callCount <= 10, `expected at most 10 waiting acts processed, got ${callCount}`);
+    assert.ok(callCount > 0, 'should process some waiting acts');
+  });
+
+  it('effect exception does not prevent board sync or latestOutcome', async () => {
+    const m = createMocks();
+    m.execute.merge = async () => ({
+      type: 'success', costUsd: null, trace: null, outcomeOpts: {},
+      nextActOpts: { prs: [], release: [] },
+    });
+    m.effects['merge:success'] = async () => { throw new Error('effect boom'); };
+    await runSingle(m, makeRun({
+      latestOutcome: OUTCOMES.APPROVED,
+      pendingAct: { id: 'act-5', name: ACTS.MERGE, opts: { prs: [], release: [] } },
+      parentEntityId: 'review-group-1',
+      parentEntityLabel: 'Review',
+    }));
+
+    // Board sync should still have happened
+    const sync = m.calls.findLast(c => c.name === 'syncState');
+    assert.ok(sync, 'board sync should happen despite effect error');
   });
 
   it('headless mode: no board operations', async () => {

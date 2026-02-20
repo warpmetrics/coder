@@ -150,25 +150,17 @@ export async function release() {
 
 function parseReleaseOpts(outcome) {
   const opts = outcome?.opts;
-  if (!opts?.releaseSteps && !opts?.release_steps) return null;
+  if (!opts?.release && !opts?.releaseSteps) return null;
 
-  // New format: structured data passed through act opts
-  if (opts.releaseSteps) {
-    return {
-      releaseSteps: opts.releaseSteps,
-      releaseDAG: opts.releaseDAG || {},
-    };
-  }
+  if (opts.release) return { release: opts.release };
 
-  // Legacy format: stringified JSON
-  try {
-    return {
-      releaseSteps: JSON.parse(opts.release_steps),
-      releaseDAG: JSON.parse(opts.release_dag || '{}'),
-    };
-  } catch {
-    return null;
-  }
+  // Legacy: releaseSteps + releaseDAG → convert
+  const dag = opts.releaseDAG || {};
+  return {
+    release: opts.releaseSteps.map(s => ({
+      repo: s.repo, command: s.script, dependsOn: dag[s.repo] || [],
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +185,7 @@ function formatPlan(steps, plans) {
       : '';
 
     console.log(`  Step ${stepNum} \u2014 ${repoShort}`);
-    console.log(`    ${step.script || '(no release script found)'}`);
+    console.log(`    ${step.command || '(no release command found)'}`);
 
     if (step.issues.length > 0) {
       console.log(`    Issues: ${step.issues.map(i => '#' + i).join(', ')}`);
@@ -284,8 +276,8 @@ async function executePlan(steps, { apiKey, releaseRunId } = {}) {
 async function executeStep(step, { repoDir, apiKey, releaseRunId }) {
   const repoShort = step.repo.split('/').pop();
 
-  if (!step.script) {
-    console.log(`  [${repoShort}] No release script — skipping`);
+  if (!step.command) {
+    console.log(`  [${repoShort}] No release command — skipping`);
     return true;
   }
 
@@ -301,17 +293,17 @@ async function executeStep(step, { repoDir, apiKey, releaseRunId }) {
       const group = await warp.createGroup(apiKey, {
         runId: releaseRunId,
         label: `Release: ${repoShort}`,
-        opts: { repo: step.repo, type: step.type, script: step.script, has_migrations: String(step.hasMigrations) },
+        opts: { repo: step.repo, command: step.command },
       });
       groupId = group.groupId;
     } catch {}
   }
 
-  console.log(`  [${repoShort}] Running: ${step.script}`);
+  console.log(`  [${repoShort}] Running: ${step.command}`);
   const startTime = Date.now();
 
   try {
-    execSync(step.script, {
+    execSync(step.command, {
       cwd: repoDir,
       stdio: 'inherit',
       timeout: 10 * 60 * 1000, // 10 minute timeout
@@ -381,8 +373,7 @@ function buildReleaseNotes(plans, steps) {
 
   for (const step of steps) {
     const repoShort = step.repo.split('/').pop();
-    const typeLabel = step.type + (step.hasMigrations ? ', migrations' : '');
-    lines.push(`  ${repoShort} (${typeLabel})`);
+    lines.push(`  ${repoShort}`);
 
     // Find PRs for this repo
     const repoPrs = [...allPrs.values()].filter(p => p.repo === step.repo);

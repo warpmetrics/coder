@@ -19,7 +19,7 @@ export async function review(item, { config, codehost, log, onStep, onBeforeLog,
     // 1. Find PRs
     onStep?.('finding PRs');
     const branchPattern = typeof issueId === 'number' ? `agent/issue-${issueId}` : `agent/${issueId}`;
-    const prs = codehost.findAllPRs(issueId, repoNames || repos.map(repoName), { branchPattern });
+    const prs = codehost.findAllPRs(issueId, repoNames || repos.map(r => repoName(r)), { branchPattern });
     if (prs.length === 0) {
       log('  no open PRs found');
       return { type: 'error', error: 'No open PRs found', costUsd: null, trace: null };
@@ -35,7 +35,7 @@ export async function review(item, { config, codehost, log, onStep, onBeforeLog,
     const repoDirs = [];
 
     for (let i = 0; i < repos.length; i++) {
-      const url = repos[i], name = repoName(url), dirName = dirNames[i], dest = join(workdir, dirName);
+      const url = repos[i].url, name = repoName(repos[i]), dirName = dirNames[i], dest = join(workdir, dirName);
       const pr = prLookup.get(name);
       if (pr) {
         const branch = codehost.getPRBranch(pr.prNumber, { repo: name });

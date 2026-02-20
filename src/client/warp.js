@@ -15,6 +15,7 @@ import {
 import { OUTCOMES, ACTS, LABELS, CLASSIFICATIONS, VERSION } from '../names.js';
 
 const API_URL = 'https://api.warpmetrics.com';
+const FETCH_TIMEOUT = 15_000;
 
 // ---------------------------------------------------------------------------
 // SDK initialization (lazy, idempotent)
@@ -77,6 +78,7 @@ export async function findRuns(apiKey, label, { limit = 20 } = {}) {
   const params = new URLSearchParams({ label, limit: String(limit) });
   const res = await fetch(`${API_URL}/v1/runs?${params}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
   if (!res.ok) return [];
   const data = await res.json();
@@ -86,6 +88,7 @@ export async function findRuns(apiKey, label, { limit = 20 } = {}) {
 async function getRunState(apiKey, runId) {
   const res = await fetch(`${API_URL}/v1/runs/${runId}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
   if (!res.ok) return null;
   const { data } = await res.json();
@@ -167,6 +170,7 @@ async function findActs(apiKey, name) {
   const params = new URLSearchParams({ name, limit: '100' });
   const res = await fetch(`${API_URL}/v1/acts?${params}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
   if (!res.ok) return [];
   const data = await res.json();
@@ -187,6 +191,7 @@ export async function registerClassifications(apiKey) {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ classification }),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT),
       });
     } catch {
       // Best-effort
@@ -294,7 +299,7 @@ export const TERMINAL_OUTCOMES = new Set([
  * Find a pending act on a run or its groups (phase groups).
  * Returns { act, parentId, parentLabel } or null.
  */
-function findPendingAct(data) {
+export function findPendingAct(data) {
   // 1. Check run's own latest outcome
   const outcomes = data.outcomes || [];
   const last = outcomes[outcomes.length - 1];
@@ -322,16 +327,30 @@ function findPendingAct(data) {
 
 export async function findOpenIssueRuns(apiKey) {
   const runs = await findRuns(apiKey, LABELS.ISSUE, { limit: 100 });
+
+  // Pre-filter using list response (no extra API calls needed).
+  const candidates = runs.filter(run => {
+    if (run.opts?.version !== VERSION) return false;
+    const outcomes = run.outcomes || [];
+    const last = outcomes[outcomes.length - 1];
+    if (last && TERMINAL_OUTCOMES.has(last.name)) return false;
+    return true;
+  });
+
+  // Only fetch full state for the few non-terminal runs.
   const open = [];
-
-  for (const run of runs) {
-    if (run.opts?.version !== VERSION) continue;
-
-    const data = await getRunState(apiKey, run.id);
+  for (const run of candidates) {
+    let data;
+    try {
+      data = await getRunState(apiKey, run.id);
+    } catch {
+      continue; // skip on network error instead of aborting all
+    }
     if (!data) continue;
 
     const outcomes = data.outcomes || [];
     const lastOutcome = outcomes[outcomes.length - 1];
+    // Re-check with full data (group outcomes may differ from run-level).
     if (lastOutcome && TERMINAL_OUTCOMES.has(lastOutcome.name)) continue;
 
     // Find pending act on issue run or its phase groups.
@@ -345,6 +364,12 @@ export async function findOpenIssueRuns(apiKey) {
       parentEntityLabel = pending.parentLabel;
     }
 
+    // Build groups map (label → groupId) from all known groups.
+    const groups = new Map();
+    for (const g of (data.groups || [])) {
+      if (g.label && g.id) groups.set(g.label, g.id);
+    }
+
     open.push({
       id: run.id,
       issueId: run.opts?.issue ? Number(run.opts.issue) : null,
@@ -356,6 +381,7 @@ export async function findOpenIssueRuns(apiKey) {
       pendingAct,
       parentEntityId,
       parentEntityLabel,
+      groups,
     });
   }
 

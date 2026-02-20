@@ -11,6 +11,7 @@ async function query(apiKey, q, variables = {}) {
       Authorization: apiKey,
     },
     body: JSON.stringify({ query: q, variables }),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -35,7 +36,7 @@ export function create({ teamKey, apiKey, columns = {} }) {
     deploy: columns.deploy || 'Deploy',
     done: columns.done || 'Done',
     blocked: columns.blocked || 'Blocked',
-    waiting: columns.waiting || 'Waiting',
+    waiting: columns.waiting || 'Waiting for Input',
     aborted: columns.aborted || 'Aborted',
   };
 
@@ -122,15 +123,17 @@ export function create({ teamKey, apiKey, columns = {} }) {
       const MAX_PAGES = 10;
 
       for (let page = 0; page < MAX_PAGES; page++) {
-        const afterClause = cursor ? `, after: "${cursor}"` : '';
+        const vars = { teamId, first: PAGE_SIZE };
+        if (cursor) vars.after = cursor;
         const data = await query(apiKey, `
-          query($teamId: String!) {
+          query($teamId: String!, $first: Int!, $after: String) {
             issues(
               filter: {
                 team: { id: { eq: $teamId } }
                 state: { type: { nin: ["canceled", "completed"] } }
               }
-              first: ${PAGE_SIZE}${afterClause}
+              first: $first
+              after: $after
               orderBy: updatedAt
             ) {
               nodes {
@@ -146,7 +149,7 @@ export function create({ teamKey, apiKey, columns = {} }) {
               }
             }
           }
-        `, { teamId });
+        `, vars);
 
         const nodes = data.issues.nodes || [];
         allIssues.push(...nodes);
@@ -182,6 +185,22 @@ export function create({ teamKey, apiKey, columns = {} }) {
     moveToBlocked(item) { return moveItem(item, 'blocked'); },
     moveToWaiting(item) { return moveItem(item, 'waiting'); },
     moveToDone(item) { return moveItem(item, 'done'); },
+
+    async listReadyForDeploy() {
+      return issuesByState(colNames.readyForDeploy);
+    },
+
+    async listDeploy() {
+      return issuesByState(colNames.deploy);
+    },
+
+    async listBlocked() {
+      return issuesByState(colNames.blocked);
+    },
+
+    async listDone() {
+      return issuesByState(colNames.done);
+    },
 
     async listAborted() {
       return issuesByState(colNames.aborted);

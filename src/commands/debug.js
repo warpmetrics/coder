@@ -59,7 +59,7 @@ function resolveContainer(inLabel, issueRunId, parentEntityId, parentEntityLabel
 
 export async function debug(argv) {
   const config = loadConfig();
-  const repoNames = config.repos.map(repoName);
+  const repoNames = config.repos.map(r => repoName(r));
   const apiKey = config.warpmetricsApiKey;
   if (!apiKey) { console.error('Error: warpmetricsApiKey required in config'); process.exit(1); }
 

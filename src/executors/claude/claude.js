@@ -37,6 +37,7 @@ export function run({ prompt, workdir, allowedTools, disallowedTools, maxTurns, 
 
     const timer = timeout ? setTimeout(() => {
       proc.kill('SIGTERM');
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
       settle(() => reject(new Error(`Claude timed out after ${Math.round(timeout / 1000)}s`)));
     }, timeout) : null;
 

@@ -82,7 +82,8 @@ function createFileProvider({ path: dir }) {
       mkdirSync(outDir, { recursive: true });
 
       // Append to a JSONL file per visibility
-      const file = join(outDir, `${visibility}.jsonl`);
+      const safeVis = ['public', 'private'].includes(visibility) ? visibility : 'public';
+      const file = join(outDir, `${safeVis}.jsonl`);
       const entry = {
         title,
         summary,

@@ -10,7 +10,8 @@ function gh(args) {
 
 function ghJson(args) {
   const out = gh(args);
-  return out ? JSON.parse(out) : null;
+  if (!out) return null;
+  try { return JSON.parse(out); } catch { return null; }
 }
 
 export function create({ project, owner, statusField = 'Status', columns = {} }) {
@@ -22,7 +23,7 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
     deploy: columns.deploy || 'Deploy',
     done: columns.done || 'Done',
     blocked: columns.blocked || 'Blocked',
-    waiting: columns.waiting || 'Waiting',
+    waiting: columns.waiting || 'Waiting for Input',
     aborted: columns.aborted || 'Aborted',
   };
 
@@ -165,6 +166,18 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
     moveToBlocked(item) { return moveItem(item, 'blocked'); },
     moveToWaiting(item) { return moveItem(item, 'waiting'); },
     moveToDone(item) { return moveItem(item, 'done'); },
+
+    async listReadyForDeploy() {
+      return enrichWithIssueId(getItemsByStatus(colNames.readyForDeploy));
+    },
+
+    async listDeploy() {
+      return enrichWithIssueId(getItemsByStatus(colNames.deploy));
+    },
+
+    async listBlocked() {
+      return enrichWithIssueId(getItemsByStatus(colNames.blocked));
+    },
 
     async listDone() {
       return enrichWithIssueId(getItemsByStatus(colNames.done));

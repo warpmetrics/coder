@@ -9,8 +9,10 @@
 export function classifyIntentPrompt(message) {
   return `Classify this message's intent. Reply with exactly one word: PROPOSE or IMPLEMENT.
 
-PROPOSE = the user explicitly asks for analysis, review, proposal, or discussion BEFORE making changes. They want to talk first.
-IMPLEMENT = anything else: direct feature requests, bug fixes, confirmations, approvals, or instructions to build/change/add something.
+PROPOSE = the user asks for analysis, review, proposal, plan, or discussion BEFORE making changes. They want to talk first.
+IMPLEMENT = direct feature requests, bug fixes, confirmations, approvals, or instructions to build/change/add something.
+
+If the message contains BOTH a request to implement AND a request to plan/propose first, choose PROPOSE — planning before implementing takes priority.
 
 When in doubt, choose IMPLEMENT.
 
@@ -41,7 +43,6 @@ export function buildImplementPrompt({
     ...repos.slice(1).map((_, i) => `    ${dirNames[i + 1]}/   ← ${repoNames[i + 1]} (clone if needed)`),
     '',
     'Decide which repo(s) to work in based on the task.', '',
-    `Special files like \`.warp-coder-ask\` MUST be written to the root: ${workdir}/.warp-coder-ask`, '',
   );
 
   if (repos.length > 1) {
@@ -76,9 +77,8 @@ export function buildImplementPrompt({
   if (shouldPropose) {
     parts.push(
       'The user is asking you to analyze or propose rather than directly implement.',
-      'DO NOT make code changes. Instead, write your analysis as markdown to:',
-      `${workdir}/.warp-coder-ask`,
-      'Then stop. The user will reply on the issue and you will be re-run with their response.', '',
+      'DO NOT make code changes. Research the codebase, analyze the request, and present your proposal or plan.',
+      'The user will reply on the issue and you will be resumed with their response.', '',
     );
   } else {
     parts.push(

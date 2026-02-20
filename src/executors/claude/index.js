@@ -47,7 +47,7 @@ function setupWorkspace(codehost, repos, { workdir, branch, resume }) {
     for (let i = 0; i < repos.length; i++) {
       const dir = join(workdir, dirNames[i]);
       if (i === 0 || existsSync(join(dir, '.git')))
-        repoDirs.push({ url: repos[i], name: repoName(repos[i]), dirName: dirNames[i], dir });
+        repoDirs.push({ url: repos[i].url, name: repoName(repos[i]), dirName: dirNames[i], dir });
     }
     return { repoDirs, dirNames, resumed: true };
   }
@@ -55,9 +55,9 @@ function setupWorkspace(codehost, repos, { workdir, branch, resume }) {
   rmSync(workdir, { recursive: true, force: true });
   mkdirSync(workdir, { recursive: true });
   const dest = join(workdir, dirNames[0]);
-  codehost.clone(repos[0], dest);
+  codehost.clone(repos[0].url, dest);
   if (branch) codehost.createBranch(dest, branch);
-  repoDirs.push({ url: repos[0], name: repoName(repos[0]), dirName: dirNames[0], dir: dest });
+  repoDirs.push({ url: repos[0].url, name: repoName(repos[0]), dirName: dirNames[0], dir: dest });
   return { repoDirs, dirNames, resumed: false };
 }
 
@@ -93,16 +93,10 @@ function discoverClonedRepos(repos, dirNames, workdir, repoDirs) {
   for (let i = 1; i < repos.length; i++) {
     const dir = join(workdir, dirNames[i]);
     if (existsSync(join(dir, '.git')) && !repoDirs.some(r => r.dir === dir))
-      repoDirs.push({ url: repos[i], name: repoName(repos[i]), dirName: dirNames[i], dir });
+      repoDirs.push({ url: repos[i].url, name: repoName(repos[i]), dirName: dirNames[i], dir });
   }
 }
 
-function readProposal(workdir, repoDirs) {
-  for (const f of [join(workdir, '.warp-coder-ask'), ...repoDirs.map(r => join(r.dir, '.warp-coder-ask'))]) {
-    if (existsSync(f)) { const q = readFileSync(f, 'utf-8').trim(); if (q) return q; }
-  }
-  return null;
-}
 
 function reflectOnStep(config, configDir, step, opts, log) {
   if (config.memory?.enabled === false) return;
@@ -148,8 +142,9 @@ export async function implement(item, { config, codehost, log, onStep, onBeforeL
     const shouldPropose = await classifyIntent(lastHumanMessage || issueBody, { model: config.quickModel || 'sonnet' });
 
     // 3. Prompt
+    const repoUrls = repos.map(r => r.url);
     const prompt = resumed ? IMPLEMENT_RESUME : buildImplementPrompt({
-      workdir, repos, repoNames: repos.map(repoName), dirNames,
+      workdir, repos: repoUrls, repoNames: repos.map(repoName), dirNames,
       primaryDirName: dirNames[0], primaryRepoName: primaryRepo, branch,
       issueId, issueTitle, issueBody, memory, commentsText, shouldPropose,
     });
@@ -171,22 +166,14 @@ export async function implement(item, { config, codehost, log, onStep, onBeforeL
 
     // 5. Proposal check
     if (shouldPropose) {
-      const question = readProposal(workdir, repoDirs);
-      if (question) return { type: 'ask_user', question, costUsd: result.costUsd, trace: result.trace,
+      return { type: 'ask_user', question: result.result, sessionId: result.sessionId,
+        costUsd: result.costUsd, trace: result.trace,
         outcomeOpts: { name: OUTCOMES.NEEDS_CLARIFICATION } };
     }
 
-    // 6. Discover repos + infer deploy plan (while workspace is still available)
+    // 6. Discover repos + push + PRs
     discoverClonedRepos(repos, dirNames, workdir, repoDirs);
-    let deployPlan = null;
-    try {
-      deployPlan = inferDeployPlan(result.sessionId, workdir, { model: config.quickModel || 'sonnet' });
-      if (deployPlan) log(`  deploy plan: ${deployPlan.releaseSteps.map(s => s.repo).join(', ')}`);
-    } catch (err) {
-      log(`  warning: deploy plan inference failed: ${err.message}`);
-    }
 
-    // 7. Push + PRs
     onStep?.('pushing');
     safeHook('onBeforePush', config, { workdir, issueNumber: issueId, branch, repo: primaryRepo }, hookOutputs);
     const { createdPRs, anyChanges } = pushAndCreatePRs(codehost, repoDirs, {
@@ -194,9 +181,20 @@ export async function implement(item, { config, codehost, log, onStep, onBeforeL
     });
     if (!anyChanges) throw new Error('No changes were produced');
 
+    // 7. Infer deploy plan (commands from config, dependencies from LLM if multi-repo)
+    let deployPlan = null;
+    let deployPlanFailed = false;
+    try {
+      const prRepos = createdPRs.map(p => ({ repo: p.repo }));
+      deployPlan = inferDeployPlan(result.sessionId, prRepos, config.deploy, workdir, { model: config.quickModel || 'sonnet', log });
+    } catch (err) {
+      deployPlanFailed = true;
+      log(`  warning: deploy plan inference failed: ${err.message}`);
+    }
+
     try { codehost.botComment(issueId, { repo: primaryRepo, body: `PRs ready for review:\n\n${createdPRs.map(p => `- ${p.repo}#${p.number}`).join('\n')}` }); } catch {}
     reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: true, hookOutputs, claudeOutput: result.result }, log);
-    return { type: 'success', costUsd: result.costUsd, trace: result.trace, prs: createdPRs.map(p => ({ repo: p.repo, prNumber: p.number })), deployPlan };
+    return { type: 'success', costUsd: result.costUsd, trace: result.trace, prs: createdPRs.map(p => ({ repo: p.repo, prNumber: p.number })), deployPlan, deployPlanFailed };
   } catch (err) {
     reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: false, error: err.message, hookOutputs }, log);
     return { type: 'error', error: err.message, costUsd: null, trace: null };
@@ -232,7 +230,7 @@ export async function revise(item, { config, codehost, log, since, onStep, onBef
 
   try {
     // 1. Clone PR branches
-  
+
     onStep?.('cloning');
     rmSync(workdir, { recursive: true, force: true });
     mkdirSync(workdir, { recursive: true });
@@ -241,7 +239,7 @@ export async function revise(item, { config, codehost, log, since, onStep, onBef
     const repoDirs = [], contextRepos = [], headsBefore = new Map();
 
     for (let i = 0; i < repos.length; i++) {
-      const url = repos[i], name = repoName(url), dirName = dirNames[i], dest = join(workdir, dirName);
+      const url = repos[i].url, name = repoName(repos[i]), dirName = dirNames[i], dest = join(workdir, dirName);
       const pr = prLookup.get(name);
       if (pr) {
         codehost.clone(url, dest, { branch: pr.branch });
