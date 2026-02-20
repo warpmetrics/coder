@@ -25,7 +25,7 @@ export function generateChangelogEntry(execFileSync, prompt, { model = 'sonnet' 
     if (!jsonMatch) return null;
 
     const parsed = JSON.parse(jsonMatch[0]);
-    if (!parsed.title || !parsed.summary || !parsed.content) return null;
+    if (!parsed.title || !parsed.entry) return null;
     return parsed;
   } catch (err) {
     const stderr = err.stderr?.toString?.() || '';
@@ -53,14 +53,14 @@ function createWarpmetricsProvider({ url, token }) {
   const apiUrl = url || 'https://api.warpmetrics.com';
 
   return {
-    async post({ title, summary, content, visibility, tags }) {
+    async post({ title, publicEntry, privateEntry, publicEntryVisible, tags }) {
       const res = await fetch(`${apiUrl}/v1/changelog`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ title, summary, content, visibility, tags }),
+        body: JSON.stringify({ title, publicEntry, privateEntry, publicEntryVisible, tags }),
       });
 
       if (!res.ok) {
@@ -78,17 +78,15 @@ function createFileProvider({ path: dir }) {
   const outDir = dir || './changelogs';
 
   return {
-    async post({ title, summary, content, visibility, tags }) {
+    async post({ title, publicEntry, privateEntry, publicEntryVisible, tags }) {
       mkdirSync(outDir, { recursive: true });
 
-      // Append to a JSONL file per visibility
-      const safeVis = ['public', 'private'].includes(visibility) ? visibility : 'public';
-      const file = join(outDir, `${safeVis}.jsonl`);
+      const file = join(outDir, 'changelog.jsonl');
       const entry = {
         title,
-        summary,
-        content,
-        visibility,
+        publicEntry,
+        privateEntry,
+        publicEntryVisible,
         tags,
         createdAt: new Date().toISOString(),
       };

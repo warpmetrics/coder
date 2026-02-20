@@ -126,7 +126,7 @@ export const GRAPH = {
           { name: OUTCOMES.DEPLOYED, in: 'Issue', next: ACTS.RELEASE },
         ],
       },
-      error: { outcomes: { name: OUTCOMES.DEPLOY_FAILED } },
+      error: { outcomes: { name: OUTCOMES.DEPLOY_FAILED, in: 'Deploy', next: ACTS.AWAIT_DEPLOY } },
     },
   },
 

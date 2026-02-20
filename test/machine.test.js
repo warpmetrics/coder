@@ -242,7 +242,7 @@ describe('NEXT_ACT', () => {
     ['await_reply:replied', ACTS.IMPLEMENT],
     ['await_reply:waiting', ACTS.AWAIT_REPLY],
     ['deploy:success', ACTS.RELEASE],
-    ['deploy:error', null],
+    ['deploy:error', ACTS.AWAIT_DEPLOY],
     ['release:success', null],
     ['release:error', ACTS.PUBLISH],
   ];

@@ -71,19 +71,18 @@ describe('generateChangelogEntry', () => {
   });
 
   it('returns null when JSON is missing required fields', () => {
-    const mockExec = () => '{"title": "Test"}'; // missing summary and content
+    const mockExec = () => '{"title": "Test"}'; // missing entry
     const result = generateChangelogEntry(mockExec, 'test prompt');
     assert.equal(result, null);
   });
 
   it('parses valid changelog entry from output', () => {
-    const entry = { title: 'New Feature', summary: 'Added X', content: 'Details here' };
+    const entry = { title: 'New Feature', entry: 'Details about the change', tags: ['feature'] };
     const mockExec = () => `Here is the entry:\n${JSON.stringify(entry)}\nDone.`;
     const result = generateChangelogEntry(mockExec, 'test prompt');
     assert.ok(result);
     assert.equal(result.title, 'New Feature');
-    assert.equal(result.summary, 'Added X');
-    assert.equal(result.content, 'Details here');
+    assert.equal(result.entry, 'Details about the change');
   });
 
   it('passes correct arguments to execFileSync', () => {

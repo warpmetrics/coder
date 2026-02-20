@@ -224,8 +224,7 @@ export const PUBLIC_CHANGELOG = `You are writing a public changelog entry for en
 
 Given the technical context below, write a changelog entry with:
 - title: Short, user-facing title (e.g. "Faster dashboard loading", "New export options")
-- summary: One sentence describing the change in plain language
-- content: 2-4 paragraphs of markdown describing what changed and why it matters to users
+- entry: 2-4 paragraphs of markdown describing what changed and why it matters to users
 
 CRITICAL RULES — violating any of these makes the entry unusable:
 - NEVER mention repository names, file paths, function names, or class names
@@ -240,16 +239,15 @@ CRITICAL RULES — violating any of these makes the entry unusable:
 - DO use clear, concise language a product manager would approve
 - If the change is purely internal with no user-visible impact, set title to "Internal improvements" and summarize briefly
 
-Respond with valid JSON only: { "title": "...", "summary": "...", "content": "...", "tags": ["feature"|"fix"|"improvement"|"internal"] }`;
+Respond with valid JSON only: { "title": "...", "entry": "...", "tags": ["feature"|"fix"|"improvement"|"internal"] }`;
 
 export const PRIVATE_CHANGELOG = `You are writing an internal/private changelog entry for the engineering team.
 
 Given the technical context below, write a changelog entry with:
 - title: Short technical title describing the change
-- summary: One sentence technical summary
-- content: Full technical details in markdown — include repo names, file paths, architectural decisions, everything relevant
+- entry: Full technical details in markdown — include repo names, file paths, architectural decisions, everything relevant
 
-Respond with valid JSON only: { "title": "...", "summary": "...", "content": "...", "tags": ["feature"|"fix"|"improvement"|"internal"] }`;
+Respond with valid JSON only: { "title": "...", "entry": "...", "tags": ["feature"|"fix"|"improvement"|"internal"] }`;
 
 // ---------------------------------------------------------------------------
 // Memory reflection

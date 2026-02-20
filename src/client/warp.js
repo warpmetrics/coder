@@ -232,7 +232,7 @@ export async function recordOutcome(apiKey, { runId }, { step, success, costUsd,
 
   const opts = { status: success ? 'success' : 'failure', step };
   if (costUsd != null) opts.cost_usd = String(costUsd);
-  if (error) opts.error = error.slice(0, 500);
+  if (error) opts.error = error.slice(0, 2000);
   if (hooksFailed) opts.hooks_failed = 'true';
   if (issueNumber) opts.issue = String(issueNumber);
   if (prNumber) opts.pr_number = String(prNumber);

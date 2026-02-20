@@ -168,6 +168,33 @@ describe('deploy executor', () => {
     assert.ok(rmCalls.length >= 1, 'should clean up after failure');
   });
 
+  it('partial failure returns completedRepos', async () => {
+    const logs = [];
+    const codehost = makeCodehost();
+    // warp succeeds (level 0), frontend fails (level 1)
+    const exec = makeExec((cmd) => {
+      if (cmd === 'npm run deploy:prod') throw new Error('build failed');
+    });
+    const fs = makeFsMock();
+
+    const actOpts = makeActOpts({
+      release: [
+        { repo: 'org/warp', command: 'npm run release:patch', dependsOn: [] },
+        { repo: 'org/frontend', command: 'npm run deploy:prod', dependsOn: ['org/warp'] },
+      ],
+    });
+
+    const result = await deploy(actOpts, {
+      codehost, deployBatch: null, exec, fs,
+      log: msg => logs.push(msg),
+    });
+
+    assert.equal(result.type, 'error');
+    assert.ok(result.completedRepos instanceof Set);
+    assert.ok(result.completedRepos.has('org/warp'), 'warp should be in completedRepos');
+    assert.ok(!result.completedRepos.has('org/frontend'), 'frontend should NOT be in completedRepos');
+  });
+
   it('no release steps returns error', async () => {
     const logs = [];
     const codehost = makeCodehost();

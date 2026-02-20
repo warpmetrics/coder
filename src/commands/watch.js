@@ -192,11 +192,21 @@ function createExecutors() {
         issueId: i.issueId, runId: i.runId, title: i.title, prs: i.prs,
         groups: i.groups ? Object.fromEntries(i.groups) : {},
       }));
+
+      // On failure, filter release/prs to only include repos that weren't deployed.
+      let prs = actOpts?.prs || [];
+      let release = actOpts?.release || [];
+      if (result.type === 'error' && result.completedRepos?.size) {
+        release = release.filter(s => !result.completedRepos.has(s.repo));
+        prs = prs.filter(p => !result.completedRepos.has(p.repo));
+        log(`retry will only deploy: ${release.map(s => s.repo).join(', ')}`);
+      }
+
       return {
         ...result,
         costUsd: null, trace: null,
         outcomeOpts: { stepCount: result.steps?.length },
-        nextActOpts: { prs: actOpts?.prs, release: actOpts?.release, batchedIssues: serializedBatch },
+        nextActOpts: { prs, release, batchedIssues: serializedBatch },
         batchedIssues,
       };
     },
@@ -243,29 +253,34 @@ function createExecutors() {
       const modelOpts = config.quickModel ? { model: config.quickModel } : {};
 
       log('generating changelog entries...');
-      const publicEntry = generateChangelogEntry(execFileSync, `${PUBLIC_PROMPT}\n\n---\n\n${context}`, modelOpts);
-      const privateEntry = generateChangelogEntry(execFileSync, `${PRIVATE_PROMPT}\n\n---\n\n${context}`, modelOpts);
+      const publicResult = generateChangelogEntry(execFileSync, `${PUBLIC_PROMPT}\n\n---\n\n${context}`, modelOpts);
+      const privateResult = generateChangelogEntry(execFileSync, `${PRIVATE_PROMPT}\n\n---\n\n${context}`, modelOpts);
 
-      if (!publicEntry && !privateEntry) {
+      if (!publicResult && !privateResult) {
         log('changelog generation failed');
         return { type: 'success', costUsd: null, trace: null, outcomeOpts: {}, batchedIssues };
       }
 
-      // Publish entries
+      // Publish as a single combined entry
       const provider = createChangelogProvider(config);
       if (!provider) {
         log('no changelog provider configured, skipping publish');
         return { type: 'success', costUsd: null, trace: null, outcomeOpts: {}, batchedIssues };
       }
 
-      for (const [label, entry, visibility] of [['public', publicEntry, 'public'], ['private', privateEntry, 'private']]) {
-        if (!entry) continue;
-        try {
-          await provider.post({ title: entry.title, summary: entry.summary, content: entry.content, visibility, tags: entry.tags });
-          log(`${label} changelog entry published`);
-        } catch (err) {
-          log(`${label} changelog entry failed: ${err.message}`);
-        }
+      try {
+        const title = publicResult?.title || privateResult?.title;
+        const tags = publicResult?.tags || privateResult?.tags;
+        await provider.post({
+          title,
+          publicEntry: publicResult?.entry || null,
+          privateEntry: privateResult?.entry || null,
+          publicEntryVisible: Boolean(publicResult?.entry),
+          tags,
+        });
+        log('changelog entry published');
+      } catch (err) {
+        log(`changelog entry failed: ${err.message}`);
       }
 
       return { type: 'success', costUsd: null, trace: null, outcomeOpts: {}, batchedIssues };

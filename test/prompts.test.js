@@ -381,10 +381,8 @@ describe('changelog prompts', () => {
 
   it('both prompts require JSON output format', () => {
     assert.ok(PUBLIC_CHANGELOG.includes('"title"'));
-    assert.ok(PUBLIC_CHANGELOG.includes('"summary"'));
-    assert.ok(PUBLIC_CHANGELOG.includes('"content"'));
+    assert.ok(PUBLIC_CHANGELOG.includes('"entry"'));
     assert.ok(PRIVATE_CHANGELOG.includes('"title"'));
-    assert.ok(PRIVATE_CHANGELOG.includes('"summary"'));
-    assert.ok(PRIVATE_CHANGELOG.includes('"content"'));
+    assert.ok(PRIVATE_CHANGELOG.includes('"entry"'));
   });
 });

@@ -102,14 +102,20 @@ export async function deploy(actOpts, { codehost, deployBatch, log, exec: execSy
     byLevel.get(step.level).push(step);
   }
 
+  const completedRepos = new Set();
   for (const level of [...byLevel.keys()].sort((a, b) => a - b)) {
     const levelSteps = byLevel.get(level);
     const results = await Promise.all(levelSteps.map(step => runStep(step, clonedRepos)));
     const failed = results.find(r => r.error);
     if (failed) {
+      // Track which repos in this level succeeded before we hit the failure.
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].ok) completedRepos.add(levelSteps[i].repo);
+      }
       cleanup(workdir);
-      return { type: 'error', error: failed.error };
+      return { type: 'error', error: failed.error, completedRepos };
     }
+    for (const step of levelSteps) completedRepos.add(step.repo);
   }
 
   // 5. Cleanup
