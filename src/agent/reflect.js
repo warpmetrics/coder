@@ -1,6 +1,6 @@
-import * as claude from '../executors/claude/claude.js';
+import { run } from '../executors/claude.js';
 import { loadMemory, saveMemory } from './memory.js';
-import { buildReflectPrompt } from '../prompts.js';
+import { buildReflectPrompt } from './prompt.js';
 
 // Serialize concurrent reflect calls so memory file doesn't get corrupted
 let lock = Promise.resolve();
@@ -19,7 +19,7 @@ async function _reflect({ configDir, step, issue, prNumber, success, error, hook
     success, error, hookOutputs, reviewComments, claudeOutput, maxLines,
   });
 
-  const result = await claude.run({
+  const result = await run({
     prompt,
     workdir: process.cwd(),
     allowedTools: '',

@@ -1,0 +1,194 @@
+# ── Phase: Build ──────────────────────────────────────────────
+
+Build:
+  executor: null
+  results:
+    created:
+      outcome: Building
+      on: Build
+      next: Implement
+
+Implement:
+  executor: implement
+  parent: Build
+  results:
+    success:
+      - outcome: PR Created
+        on: Build
+      - outcome: PR Created
+        on: Issue
+        next: Review
+    error:
+      outcome: Implementation Failed
+    ask_user:
+      outcome: Needs Clarification
+      on: Build
+      next: Await Reply
+    max_turns:
+      outcome: Paused
+      on: Build
+      next: Implement
+
+Await Reply:
+  executor: await_reply
+  parent: Build
+  results:
+    replied:
+      outcome: Clarified
+      on: Build
+      next: Implement
+    waiting:
+      outcome: Waiting
+      on: Build
+      next: Await Reply
+
+# ── Phase: Review ─────────────────────────────────────────────
+
+Review:
+  executor: null
+  results:
+    created:
+      outcome: Reviewing
+      on: Review
+      next: Evaluate
+
+Evaluate:
+  executor: review
+  parent: Review
+  results:
+    approved:
+      outcome: Approved
+      on: Review
+      next: Merge
+    changes_requested:
+      outcome: Changes Requested
+      on: Review
+      next: Revise
+    error:
+      outcome: Failed
+      on: Review
+      next: Evaluate
+    max_retries:
+      outcome: Failed
+      on: Review
+
+Revise:
+  executor: revise
+  parent: Review
+  results:
+    success:
+      outcome: Fixes Applied
+      on: Review
+      next: Evaluate
+    error:
+      outcome: Revision Failed
+    max_retries:
+      outcome: Max Retries
+
+Merge:
+  executor: merge
+  parent: Review
+  results:
+    success:
+      - outcome: Merged
+        on: Review
+      - outcome: Merged
+        on: Issue
+        next: Deploy
+    error:
+      outcome: Merge Failed
+
+# ── Phase: Deploy ─────────────────────────────────────────────
+
+Deploy:
+  executor: null
+  results:
+    created:
+      outcome: Awaiting Deploy
+      on: Deploy
+      next: Await Deploy
+
+Await Deploy:
+  label: Deploy Check
+  executor: await_deploy
+  parent: Deploy
+  results:
+    approved:
+      outcome: Deploy Approved
+      on: Deploy
+      next: Run Deploy
+    waiting:
+      outcome: Awaiting Deploy
+      on: Deploy
+      next: Await Deploy
+
+Run Deploy:
+  label: Deploy Execution
+  executor: deploy
+  parent: Deploy
+  results:
+    success:
+      - outcome: Deployed
+        on: Deploy
+      - outcome: Deployed
+        on: Issue
+        next: Release
+    error:
+      outcome: Deploy Failed
+      on: Deploy
+      next: Await Deploy
+
+# ── Phase: Release ────────────────────────────────────────────
+
+Release:
+  executor: null
+  results:
+    created:
+      outcome: Releasing
+      on: Release
+      next: Publish
+
+Publish:
+  label: Release Notes
+  executor: release
+  parent: Release
+  results:
+    success:
+      - outcome: Released
+        on: Release
+      - outcome: Released
+    error:
+      outcome: Release Failed
+      on: Release
+      next: Publish
+
+# ── Board states ──────────────────────────────────────────────
+
+states:
+  Started: todo
+  Resumed: inProgress
+  Shipped: done
+  Aborted: blocked
+  Building: inProgress
+  Reviewing: inReview
+  Releasing: deploy
+  PR Created: inReview
+  Fixes Applied: inReview
+  Changes Requested: inProgress
+  Approved: inReview
+  Needs Clarification: waiting
+  Clarified: inProgress
+  Paused: blocked
+  Waiting: waiting
+  Merged: readyForDeploy
+  Awaiting Deploy: readyForDeploy
+  Deploy Approved: deploy
+  Deployed: deploy
+  Deploy Failed: blocked
+  Released: done
+  Release Failed: blocked
+  Implementation Failed: blocked
+  Revision Failed: blocked
+  Max Retries: blocked
+  Merge Failed: blocked
+  Failed: blocked

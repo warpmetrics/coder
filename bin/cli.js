@@ -4,9 +4,9 @@ import { createInterface } from 'readline';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { join } from 'path';
-import { registerClassifications } from '../src/client/warp.js';
+import { registerClassifications } from '../src/clients/warp.js';
 import { CONFIG_DIR } from '../src/config.js';
-import { discoverProjectFields } from '../src/boards/github.js';
+import { discoverProjectFields } from '../src/clients/boards/github.js';
 import { loadMemory } from '../src/agent/memory.js';
 import { reflect } from '../src/agent/reflect.js';
 

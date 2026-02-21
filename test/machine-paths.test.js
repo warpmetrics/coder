@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { OUTCOMES, ACTS } from '../src/names.js';
 import {
-  GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, NEXT_ACT, BOARD_COLUMNS,
+  GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, NEXT_ACT, STATES,
 } from '../src/machine.js';
 import {
   buildTransitionGraph, findReachableActs, validateGraph, findOrphanOutcomes,
@@ -14,10 +14,10 @@ import {
 
 describe('graph consistency', () => {
 
-  it('every outcome name in RESULT_EDGES exists in BOARD_COLUMNS', () => {
+  it('every outcome name in RESULT_EDGES exists in STATES', () => {
     for (const [key, edges] of Object.entries(RESULT_EDGES)) {
       for (const edge of edges) {
-        assert.ok(edge.name in BOARD_COLUMNS, `RESULT_EDGES['${key}'] outcome '${edge.name}' missing from BOARD_COLUMNS`);
+        assert.ok(edge.name in STATES, `RESULT_EDGES['${key}'] outcome '${edge.name}' missing from STATES`);
       }
     }
   });
@@ -120,5 +120,106 @@ describe('graph consistency', () => {
       assert.ok(node, `auto edge from unknown act ${e.from}`);
       assert.equal(node.executor, null, `auto edge ${e.from} should be a phase group`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Custom graph validation
+// ---------------------------------------------------------------------------
+
+describe('custom graph validation', () => {
+  it('validates a valid custom graph', () => {
+    const customGraph = {
+      'Start': {
+        label: 'Start',
+        executor: null,
+        results: {
+          created: { outcomes: { name: 'Started', in: 'Start', next: 'Do' } },
+        },
+      },
+      'Do': {
+        label: 'Do Work',
+        group: 'Start',
+        executor: 'worker',
+        results: {
+          success: { outcomes: { name: 'Done' } },
+        },
+      },
+    };
+    const customStates = { 'Started': 'inProgress', 'Done': 'done' };
+    const result = validateGraph(customGraph, customStates);
+    assert.ok(result.ok, `Custom graph validation errors: ${result.errors.join(', ')}`);
+  });
+
+  it('rejects graph with missing outcome in states', () => {
+    const customGraph = {
+      'Start': {
+        label: 'Start',
+        executor: null,
+        results: {
+          created: { outcomes: { name: 'Started', in: 'Start', next: 'Do' } },
+        },
+      },
+      'Do': {
+        label: 'Do Work',
+        group: 'Start',
+        executor: 'worker',
+        results: {
+          success: { outcomes: { name: 'Done' } },
+        },
+      },
+    };
+    const customStates = { 'Started': 'inProgress' }; // Missing 'Done'
+    const result = validateGraph(customGraph, customStates);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some(e => e.includes("'Done'")), 'should report missing Done state');
+  });
+
+  it('buildTransitionGraph works with custom graph', () => {
+    const customGraph = {
+      'A': {
+        label: 'Phase A',
+        executor: null,
+        results: {
+          created: { outcomes: { name: 'ACreated', in: 'Phase A', next: 'B' } },
+        },
+      },
+      'B': {
+        label: 'Step B',
+        group: 'Phase A',
+        executor: 'doB',
+        results: {
+          success: { outcomes: { name: 'BDone' } },
+        },
+      },
+    };
+    const { edges } = buildTransitionGraph(customGraph);
+    assert.equal(edges.length, 2);
+    assert.ok(edges.some(e => e.from === 'A' && e.to === 'B' && e.type === 'auto'));
+    assert.ok(edges.some(e => e.from === 'B' && e.to === 'TERMINAL' && e.type === 'terminal'));
+  });
+
+  it('findReachableActs works with custom graph', () => {
+    const customGraph = {
+      'X': {
+        label: 'X',
+        executor: null,
+        results: { created: { outcomes: { name: 'XCreated', next: 'Y' } } },
+      },
+      'Y': {
+        label: 'Y',
+        executor: 'doY',
+        results: { success: { outcomes: { name: 'YDone' } } },
+      },
+      'Z': {
+        label: 'Z',
+        executor: 'doZ',
+        results: { success: { outcomes: { name: 'ZDone' } } },
+      },
+    };
+    const reachable = findReachableActs('X', customGraph);
+    assert.ok(reachable.has('X'));
+    assert.ok(reachable.has('Y'));
+    assert.equal(reachable.has('Z'), false, 'Z should be unreachable');
   });
 });

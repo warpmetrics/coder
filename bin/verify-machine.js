@@ -21,7 +21,7 @@ console.log('Graph Consistency:');
 if (errors.length === 0) {
   console.log('  [PASS] All nodes have label, executor, results');
   console.log('  [PASS] All next acts valid');
-  console.log('  [PASS] All outcomes in BOARD_COLUMNS');
+  console.log('  [PASS] All outcomes in STATES');
   console.log('  [PASS] All acts reachable from BUILD');
 } else {
   for (const err of errors) {

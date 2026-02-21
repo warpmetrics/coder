@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, NEXT_ACT, BOARD_COLUMNS,
+  GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, NEXT_ACT, STATES,
 } from '../src/machine.js';
 import { OUTCOMES, ACTS } from '../src/names.js';
 
@@ -201,6 +201,7 @@ describe('RESULT_OUTCOMES', () => {
     ['review:approved', OUTCOMES.APPROVED],
     ['review:changes_requested', OUTCOMES.CHANGES_REQUESTED],
     ['review:error', OUTCOMES.FAILED],
+    ['review:max_retries', OUTCOMES.FAILED],
     ['revise:success', OUTCOMES.FIXES_APPLIED],
     ['revise:error', OUTCOMES.REVISION_FAILED],
     ['revise:max_retries', OUTCOMES.MAX_RETRIES],
@@ -232,6 +233,7 @@ describe('NEXT_ACT', () => {
     ['review:approved', ACTS.MERGE],
     ['review:changes_requested', ACTS.REVISE],
     ['review:error', ACTS.EVALUATE],
+    ['review:max_retries', null],
     ['revise:success', ACTS.EVALUATE],
     ['revise:error', null],
     ['revise:max_retries', null],
@@ -254,11 +256,11 @@ describe('NEXT_ACT', () => {
   }
 });
 
-describe('BOARD_COLUMNS', () => {
+describe('STATES', () => {
   it('covers all outcome names in RESULT_EDGES', () => {
     for (const [key, edges] of Object.entries(RESULT_EDGES)) {
       for (const edge of edges) {
-        assert.ok(edge.name in BOARD_COLUMNS, `BOARD_COLUMNS missing '${edge.name}' from ${key}`);
+        assert.ok(edge.name in STATES, `STATES missing '${edge.name}' from ${key}`);
       }
     }
   });
@@ -269,7 +271,7 @@ describe('BOARD_COLUMNS', () => {
       for (const result of Object.values(node.results)) {
         const outcomes = normalizeOutcomes(result.outcomes);
         for (const oc of outcomes) {
-          assert.ok(oc.name in BOARD_COLUMNS, `BOARD_COLUMNS missing phase outcome '${oc.name}' from ${act}`);
+          assert.ok(oc.name in STATES, `STATES missing phase outcome '${oc.name}' from ${act}`);
         }
       }
     }
@@ -281,7 +283,7 @@ describe('BOARD_COLUMNS', () => {
       if (nextAct !== null) continue;
       const outcome = RESULT_OUTCOMES[key];
       if (exceptions.has(outcome)) continue;
-      const column = BOARD_COLUMNS[outcome];
+      const column = STATES[outcome];
       assert.ok(
         column === 'done' || column === 'blocked',
         `Terminal outcome '${outcome}' maps to '${column}', expected 'done' or 'blocked'`
@@ -321,7 +323,7 @@ describe('BOARD_COLUMNS', () => {
 
   for (const [outcome, col] of expected) {
     it(`${outcome} → ${col}`, () => {
-      assert.equal(BOARD_COLUMNS[outcome], col);
+      assert.equal(STATES[outcome], col);
     });
   }
 });

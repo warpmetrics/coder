@@ -2,7 +2,6 @@
 // runs executors, records outcomes, emits next acts, syncs board.
 // All adapters injected via constructor.
 
-import { GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, BOARD_COLUMNS } from './machine.js';
 import { OUTCOMES } from './names.js';
 
 // ---------------------------------------------------------------------------
@@ -27,11 +26,28 @@ function normalizeOutcomes(outcomes) {
   return Array.isArray(outcomes) ? outcomes : [outcomes];
 }
 
-export function createRunner({ warp, board, codehost, config, execute, effects, findDeployBatch, log: logFn }) {
+export function createRunner({ warp, board, git, prs, issues, notify, config, claudeCode, graph, states, execute, effects, contextProviders, log: logFn }) {
   const repoNames = config.repoNames;
   const apiKey = config.warpmetricsApiKey;
   const concurrency = config.concurrency || 1;
   const inFlight = new Map();
+
+  // Derive act → executor mapping from graph at construction time.
+  const actExecutor = Object.fromEntries(
+    Object.entries(graph).filter(([, n]) => n.executor !== null).map(([a, n]) => [a, n.executor])
+  );
+
+  // Derive allowed result types per executor from graph (for runtime enforcement).
+  const executorResultTypes = new Map();
+  for (const node of Object.values(graph)) {
+    if (node.executor === null) continue;
+    if (!executorResultTypes.has(node.executor)) {
+      executorResultTypes.set(node.executor, new Set());
+    }
+    for (const resultType of Object.keys(node.results)) {
+      executorResultTypes.get(node.executor).add(resultType);
+    }
+  }
 
   function log(issueId, msg) {
     logFn?.(issueId, msg);
@@ -44,7 +60,7 @@ export function createRunner({ warp, board, codehost, config, execute, effects, 
   async function startPipeline(executorName, run, act) {
     if (!apiKey) return null;
     try {
-      const pNode = GRAPH[act.name];
+      const pNode = graph[act.name];
       const p = await warp.startPipeline(apiKey, {
         step: executorName, label: pNode?.label,
         repo: run.repo, issueNumber: run.issueId,
@@ -60,9 +76,6 @@ export function createRunner({ warp, board, codehost, config, execute, effects, 
 
   async function finishPipeline(pipelineRunId, executorName, run, result) {
     if (!apiKey || !pipelineRunId) return;
-    if (result.trace) {
-      try { await warp.traceClaudeCall(apiKey, pipelineRunId, result.trace); } catch {}
-    }
     try {
       await warp.recordOutcome(apiKey, { runId: pipelineRunId }, {
         step: executorName, success: result.type !== 'error',
@@ -78,181 +91,165 @@ export function createRunner({ warp, board, codehost, config, execute, effects, 
   // processRun — the core act-driven step
   // -------------------------------------------------------------------------
 
-  async function processRun(run) {
+  async function processRun(run, { onStep, onClearStep, onBeforeLog } = {}) {
     let act = run.pendingAct;
     if (!act) return;
 
-    // Loop: process the current act, then immediately continue to the next
-    // act if one was emitted. Breaks on terminal outcomes, waiting, or errors.
-    // This eliminates 30s poll waits between fast inline transitions while
-    // keeping the poll interval for external state (board, new issues, aborts).
+    const visited = new Set();
     while (act) {
-      const node = GRAPH[act.name];
+      if (visited.has(act.name)) break;
+      visited.add(act.name);
 
-      // Phase group auto-transition: create group, record outcome, emit first work act.
-      if (node && node.executor === null) {
-        const phaseResult = Object.values(node.results)[0];
-        const outcomes = normalizeOutcomes(phaseResult.outcomes);
-        const lastOutcome = outcomes[outcomes.length - 1];
-        let nextActId = null;
+      const node = graph[act.name];
+      if (!node) break;
 
+      // ── Step 1: Produce result ──────────────────────────────────
+      let result;
+      let executorName = node.executor;
+
+      if (executorName === null) {
+        // Phase group: create group, auto-resolve to 'created'.
         if (apiKey) {
+          const { groupId } = warp.batchGroup(apiKey, { runId: run.id, label: node.label });
+          if (!run.groups) run.groups = new Map();
+          run.groups.set(node.label, groupId);
+        }
+        result = { type: 'created' };
+        log(run.issueId, `phase: ${node.label}`);
+      } else {
+        if (!execute[executorName]) break;
+        onStep?.(run.issueId, node.label || executorName);
+
+        const canWait = Object.keys(node.results).includes('waiting');
+
+        // Run context provider if one exists for this executor.
+        let extraContext = {};
+        const provider = contextProviders?.[executorName];
+        if (provider) {
+          try { Object.assign(extraContext, await provider(run, act)); }
+          catch (err) { log(run.issueId, `warning: context provider failed: ${err.message}`); }
+        }
+
+        // Before effect (awaited — effect decides whether to block by awaiting its own work or returning immediately).
+        const beforeKey = `${executorName}:before`;
+        if (effects[beforeKey]) {
           try {
-            const containerId = run.id;
-            const { groupId } = await warp.createGroup(apiKey, {
-              runId: containerId, label: node.label,
+            await effects[beforeKey](run, {
+              config,
+              clients: { git, prs, issues, notify, warp, board },
+              context: { actOpts: act.opts, log: (msg) => log(run.issueId, msg), ...extraContext },
             });
-            if (!run.groups) run.groups = new Map();
-            run.groups.set(node.label, groupId);
-
-            for (const oc of outcomes) {
-              const { outcomeId } = await warp.recordIssueOutcome(apiKey, { runId: groupId, name: oc.name });
-              if (oc.next) {
-                const { actId } = await warp.emitAct(apiKey, { outcomeId, name: oc.next, opts: act.opts });
-                nextActId = actId;
-              }
-            }
-
-            await warp.recordIssueOutcome(apiKey, { runId: run.id, name: lastOutcome.name });
-            log(run.issueId, `phase: ${node.label}`);
           } catch (err) {
-            log(run.issueId, `warning: phase group failed: ${err.message}`);
-            break;
+            log(run.issueId, `warning: before effect failed: ${err.message}`);
           }
         }
 
-        if (board && run.boardItem) {
-          const column = BOARD_COLUMNS[lastOutcome.name];
-          if (column) {
-            try { await board.syncState(run.boardItem, column); } catch (err) {
-              log(run.issueId, `warning: board sync to ${column} failed: ${err.message}`);
-            }
-          }
+        // Pipeline (skip for waiting-capable executors until they resolve).
+        let pipelineRunId = canWait ? null : await startPipeline(executorName, run, act);
+
+        // Execute.
+        result = await execute[executorName](run, {
+          config,
+          clients: { git, prs, issues, notify, claudeCode: claudeCode?.forRun(pipelineRunId), warp },
+          context: { pipelineRunId, actOpts: act.opts, log: (msg) => log(run.issueId, msg), onStep: (step) => onStep?.(run.issueId, step), onBeforeLog, ...extraContext },
+        });
+
+        // Enforce: result type must be declared in graph.
+        const allowed = executorResultTypes.get(executorName);
+        if (allowed && !allowed.has(result.type)) {
+          log(run.issueId, `error: executor '${executorName}' returned undeclared result type '${result.type}' (expected: ${[...allowed].join(', ')})`);
+          break;
         }
 
-        // Continue to the emitted work act.
-        if (lastOutcome.next) {
-          run.latestOutcome = lastOutcome.name;
-          act = { id: nextActId, name: lastOutcome.next, opts: act.opts };
-          continue;
-        }
-        break;
+        if (result.type === 'waiting') break;
+
+        // Create pipeline retroactively for waiting-capable executors that resolved.
+        if (!pipelineRunId) pipelineRunId = await startPipeline(executorName, run, act);
+        await finishPipeline(pipelineRunId, executorName, run, result);
       }
 
-      // Work act execution.
-      const executorName = ACT_EXECUTOR[act.name];
-      if (!executorName || !execute[executorName]) break;
+      // ── Step 2: Resolve edges from graph ──────────────────────────
+      const resultDef = node.results[result.type];
+      if (!resultDef) break;
+      const edges = normalizeOutcomes(resultDef.outcomes);
 
-      // Skip board sync and pipeline for waiting-capable executors — they poll
-      // every cycle and must not override manual board moves.
-      const canWait = Object.keys(node.results).includes('waiting');
-
-      // Board sync: in-progress before executing.
-      if (!canWait && board && run.boardItem) {
-        const column = BOARD_COLUMNS[run.latestOutcome];
-        if (column) {
-          try { await board.syncState(run.boardItem, column); } catch (err) {
-            log(run.issueId, `warning: board sync to ${column} failed: ${err.message}`);
-          }
-        }
-      }
-
-      // Pre-compute deploy batch if applicable.
-      let extraContext = {};
-      if (executorName === 'deploy' && findDeployBatch) {
-        try {
-          extraContext.deployBatch = await findDeployBatch(run, act);
-        } catch (err) {
-          log(run.issueId, `warning: batch failed: ${err.message}`);
-        }
-      }
-
-      // Step 1: Create pipeline run (visible immediately).
-      let pipelineRunId = canWait ? null : await startPipeline(executorName, run, act);
-
-      // Step 2: Execute.
-      const result = await execute[executorName](run, { codehost, config, repoNames, log: (msg) => log(run.issueId, msg), actOpts: act.opts, ...extraContext });
-
-      // Waiting = no-op — pending act stays unchanged, no telemetry or board sync.
-      if (result.type === 'waiting') break;
-
-      // Create pipeline retroactively for waiting-capable executors that resolved.
-      if (!pipelineRunId) pipelineRunId = await startPipeline(executorName, run, act);
-
-      // Step 3: Record outcome.
-      await finishPipeline(pipelineRunId, executorName, run, result);
-
-      // Route outcomes + emit next act using RESULT_EDGES.
-      const resultKey = `${executorName}:${result.type}`;
-      const edges = RESULT_EDGES[resultKey];
+      // ── Step 3: Atomic commit (outcomes + act in single flush) ──
       let nextAct = null;
-
-      if (edges && apiKey) {
+      if (apiKey) {
         try {
           let recordedOnIssueRun = false;
           for (const edge of edges) {
             const containerId = resolveContainer(edge.in, run, log);
             if (containerId === run.id) recordedOnIssueRun = true;
 
-            const { outcomeId } = await warp.recordIssueOutcome(apiKey, {
+            const { outcomeId } = warp.batchOutcome(apiKey, {
               runId: containerId, name: edge.name, opts: result.outcomeOpts,
             });
 
-            if (edge.next && outcomeId) {
-              const nao = result.nextActOpts || {};
-              const { actId } = await warp.emitAct(apiKey, {
-                outcomeId, name: edge.next, opts: nao,
-              });
-              nextAct = { id: actId, name: edge.next, opts: nao };
+            if (edge.next) {
+              if (!outcomeId) {
+                log(run.issueId, `warning: outcomeId missing for ${edge.name}, cannot emit ${edge.next}`);
+              } else {
+                const nao = result.nextActOpts || act.opts || {};
+                const { actId } = warp.batchAct(apiKey, {
+                  outcomeId, name: edge.next, opts: nao,
+                });
+                nextAct = { id: actId, name: edge.next, opts: nao };
+              }
             }
           }
 
+          // Mirror last outcome on Issue Run for board tracking.
           if (!recordedOnIssueRun) {
-            const boardOutcome = edges[edges.length - 1].name;
-            await warp.recordIssueOutcome(apiKey, { runId: run.id, name: boardOutcome });
+            warp.batchOutcome(apiKey, { runId: run.id, name: edges[edges.length - 1].name });
           }
+
+          await warp.batchFlush(apiKey);
         } catch (err) {
           log(run.issueId, `warning: outcome/act failed: ${err.message}`);
+          break;
         }
       }
 
-      // Side effects.
+      // ── Step 4: Board sync (one place, fire-and-forget) ─────────
+      const boardOutcomeName = edges[edges.length - 1].name;
+      if (board && run.boardItem) {
+        const column = states[boardOutcomeName];
+        if (column) {
+          board.syncState(run.boardItem, column).catch(err =>
+            log(run.issueId, `warning: board sync to ${column} failed: ${err.message}`)
+          );
+        }
+      }
+
+      // ── Step 5: Effects ─────────────────────────────────────────
+      const resultKey = executorName ? `${executorName}:${result.type}` : `${act.name}:${result.type}`;
       if (effects[resultKey]) {
         try {
-          await effects[resultKey](run, result, { codehost, config, repoNames, warp, apiKey, board, log: (msg) => log(run.issueId, msg) });
+          await effects[resultKey](run, result, {
+              config,
+              clients: { git, prs, issues, notify, warp, board },
+              context: { log: (msg) => log(run.issueId, msg) },
+            });
         } catch (err) {
           log(run.issueId, `warning: effect failed: ${err.message}`);
         }
       }
 
-      // Board sync: post-execution.
-      const boardOutcome = RESULT_OUTCOMES[resultKey];
-      if (board && run.boardItem) {
-        const column = BOARD_COLUMNS[boardOutcome];
-        if (column) {
-          try {
-            await board.syncState(run.boardItem, column);
-            log(run.issueId, `board: ${column}`);
-          } catch (err) {
-            log(run.issueId, `warning: board sync to ${column} failed: ${err.message}`);
-          }
-        }
-      }
-      if (boardOutcome) run.latestOutcome = boardOutcome;
-
-      // Continue to next act if one was emitted and it's a forward
-      // transition (different act). Retries (same act name) wait for
-      // the next poll cycle so external state can change.
-      if (!nextAct || nextAct.name === act.name) break;
+      // ── Step 6: Continue or break ──────────────────────────────
+      run.latestOutcome = boardOutcomeName;
+      if (!nextAct) break;
       act = nextAct;
     }
+
+    onClearStep?.(run.issueId);
   }
 
   // -------------------------------------------------------------------------
   // poll — one cycle of intake + processing
   // -------------------------------------------------------------------------
 
-  async function poll({ onStep, onClearStep } = {}) {
+  async function poll({ onStep, onClearStep, onBeforeLog } = {}) {
     // Fetch open runs first so intake can dedup.
     let openRuns = [];
     if (apiKey) {
@@ -354,15 +351,15 @@ export function createRunner({ warp, board, codehost, config, execute, effects, 
     const waitingActs = [];
     const workActs = [];
     for (const run of ready) {
-      const node = GRAPH[run.pendingAct.name];
-      const executorName = ACT_EXECUTOR[run.pendingAct.name];
+      const node = graph[run.pendingAct.name];
+      const executorName = actExecutor[run.pendingAct.name];
       const isWaiting = node && executorName && Object.keys(node.results).includes('waiting');
       (isWaiting ? waitingActs : workActs).push(run);
     }
 
     const maxWaiting = Math.max(concurrency * 5, 10);
     for (const run of waitingActs.slice(0, maxWaiting)) {
-      await processRun(run);
+      await processRun(run, { onStep, onClearStep, onBeforeLog });
     }
 
     // Launch work acts into available slots.
@@ -371,7 +368,7 @@ export function createRunner({ warp, board, codehost, config, execute, effects, 
 
     for (const run of toProcess) {
       onStep?.(run.issueId, run.pendingAct.name);
-      const promise = processRun(run)
+      const promise = processRun(run, { onStep, onClearStep, onBeforeLog })
         .catch(err => log(run.issueId, `task error: ${err.message}`))
         .finally(() => {
           inFlight.delete(run.issueId);

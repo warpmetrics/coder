@@ -7,14 +7,15 @@ import { existsSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { loadConfig } from '../config.js';
-import * as warp from '../client/warp.js';
-import { createCodeHost } from '../codehosts/index.js';
-import { topoSort, mergeDAGs, buildSteps } from '../workflows/plan.js';
-import { createChangelogProvider, generateChangelogEntry } from '../executors/changelog/lib.js';
-import { PUBLIC_CHANGELOG as PUBLIC_PROMPT, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from '../prompts.js';
+import * as warp from '../clients/warp.js';
+import * as git from '../clients/git.js';
+import { createPRClient } from '../clients/prs/index.js';
+import { topoSort, mergeDAGs, buildSteps } from '../executors/deploy/plan.js';
+import { createChangelogProvider, generateChangelogEntry } from '../executors/release/changelog.js';
+import { PUBLIC_CHANGELOG as PUBLIC_PROMPT, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from '../executors/release/prompt.js';
 import { OUTCOMES } from '../names.js';
 
-const codehost = createCodeHost();
+const prs = createPRClient();
 
 function parsePRList(prList) {
   if (!prList) return [];
@@ -230,7 +231,7 @@ async function executePlan(steps, { apiKey, releaseRunId } = {}) {
 
     console.log(`  Cloning ${step.repo}...`);
     try {
-      codehost.clone(repoUrl, dest);
+      git.clone(repoUrl, dest);
       clonedRepos.set(step.repo, dest);
     } catch (err) {
       console.error(`  Failed to clone ${step.repo}: ${err.message}`);
@@ -379,8 +380,8 @@ function buildReleaseNotes(plans, steps) {
     const repoPrs = [...allPrs.values()].filter(p => p.repo === step.repo);
     for (const { repo, prNumber } of repoPrs) {
       try {
-        const commits = codehost.getPRCommits(prNumber, { repo });
-        const files = codehost.getPRFiles(prNumber, { repo });
+        const commits = prs.getPRCommits(prNumber, { repo });
+        const files = prs.getPRFiles(prNumber, { repo });
         const additions = files.reduce((s, f) => s + (f.additions || 0), 0);
         const deletions = files.reduce((s, f) => s + (f.deletions || 0), 0);
 
@@ -414,8 +415,8 @@ function gatherPRContext(issues, { verbose = false } = {}) {
   for (const { prList } of issues) {
     for (const { repo, prNumber } of parsePRList(prList)) {
       try {
-        const files = codehost.getPRFiles(prNumber, { repo });
-        const commits = codehost.getPRCommits(prNumber, { repo });
+        const files = prs.getPRFiles(prNumber, { repo });
+        const commits = prs.getPRCommits(prNumber, { repo });
         context.push({ repo, prNumber, files, commits });
       } catch (err) {
         if (verbose) console.log(`  Warning: could not fetch PR ${repo}#${prNumber}: ${err.message}`);

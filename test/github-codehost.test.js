@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { create } from '../src/codehosts/github.js';
+import { create } from '../src/clients/prs/github.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — override methods on the codehost object to avoid real CLI calls.

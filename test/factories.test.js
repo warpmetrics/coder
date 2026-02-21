@@ -1,7 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createBoard } from '../src/boards/index.js';
-import { createCodeHost } from '../src/codehosts/index.js';
+import { createBoard } from '../src/clients/boards/index.js';
+import { createPRClient } from '../src/clients/prs/index.js';
+import { createIssueClient } from '../src/clients/issues/index.js';
+import { createNotifier } from '../src/clients/notify/index.js';
 
 // ---------------------------------------------------------------------------
 // createBoard
@@ -35,21 +37,21 @@ describe('createBoard factory', () => {
 });
 
 // ---------------------------------------------------------------------------
-// createCodeHost
+// createPRClient
 // ---------------------------------------------------------------------------
 
-describe('createCodeHost factory', () => {
+describe('createPRClient factory', () => {
 
   it('throws for unknown provider', () => {
     assert.throws(
-      () => createCodeHost({ codehost: { provider: 'gitlab' } }),
-      { message: /Unknown codehost provider: gitlab/ },
+      () => createPRClient({ codehost: { provider: 'gitlab' } }),
+      { message: /Unknown PR provider: gitlab/ },
     );
   });
 
   it('error message lists available providers', () => {
     try {
-      createCodeHost({ codehost: { provider: 'bitbucket' } });
+      createPRClient({ codehost: { provider: 'bitbucket' } });
       assert.fail('should throw');
     } catch (err) {
       assert.ok(err.message.includes('github'));
@@ -57,16 +59,64 @@ describe('createCodeHost factory', () => {
   });
 
   it('defaults to github when no provider specified', () => {
-    // create() with no config returns a github codehost (which has clone, push, etc.)
-    const ch = createCodeHost({});
-    assert.ok(typeof ch.clone === 'function');
-    assert.ok(typeof ch.push === 'function');
-    assert.ok(typeof ch.createPR === 'function');
-    assert.ok(typeof ch.classifyReviewItems === 'function');
+    const client = createPRClient({});
+    assert.ok(typeof client.createPR === 'function');
+    assert.ok(typeof client.mergePR === 'function');
+    assert.ok(typeof client.classifyReviewItems === 'function');
   });
 
   it('defaults to github when config is null', () => {
-    const ch = createCodeHost(null);
-    assert.ok(typeof ch.mergePR === 'function');
+    const client = createPRClient(null);
+    assert.ok(typeof client.mergePR === 'function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createIssueClient
+// ---------------------------------------------------------------------------
+
+describe('createIssueClient factory', () => {
+
+  it('throws for unknown provider', () => {
+    assert.throws(
+      () => createIssueClient({ issues: { provider: 'jira' } }),
+      { message: /Unknown issue provider: jira/ },
+    );
+  });
+
+  it('falls back to codehost provider', () => {
+    const client = createIssueClient({ codehost: { provider: 'github' } });
+    assert.ok(typeof client.getIssueBody === 'function');
+  });
+
+  it('defaults to github when no provider specified', () => {
+    const client = createIssueClient({});
+    assert.ok(typeof client.getIssueBody === 'function');
+    assert.ok(typeof client.getIssueComments === 'function');
+    assert.ok(typeof client.addLabels === 'function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createNotifier
+// ---------------------------------------------------------------------------
+
+describe('createNotifier factory', () => {
+
+  it('throws for unknown provider in channels', () => {
+    assert.throws(
+      () => createNotifier({ notify: [{ provider: 'telegram' }] }),
+      { message: /Unknown notify provider: telegram/ },
+    );
+  });
+
+  it('defaults to github when no notify config', () => {
+    const notifier = createNotifier({});
+    assert.ok(typeof notifier.comment === 'function');
+  });
+
+  it('defaults to github when config is null', () => {
+    const notifier = createNotifier(null);
+    assert.ok(typeof notifier.comment === 'function');
   });
 });

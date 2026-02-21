@@ -4,8 +4,8 @@
 
 import { createInterface } from 'readline';
 import { loadConfig, repoName } from '../config.js';
-import * as warp from '../client/warp.js';
-import { GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, BOARD_COLUMNS } from '../machine.js';
+import * as warp from '../clients/warp.js';
+import { GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, STATES } from '../machine.js';
 import { OUTCOMES, ACTS } from '../names.js';
 
 const RESULT_CHOICES = {
@@ -90,7 +90,7 @@ export async function debug(argv) {
   let parentEntityLabel = null;
 
   while (true) {
-    const column = BOARD_COLUMNS[latestOutcome];
+    const column = STATES[latestOutcome];
 
     console.log(`─── column: ${column || '?'} │ outcome: ${latestOutcome} ───`);
 

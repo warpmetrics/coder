@@ -7,13 +7,15 @@
     "warp-coder": "./bin/cli.js"
   },
   "scripts": {
-    "test": "node --test 'test/*.test.js'",
+    "test": "node --test 'test/*.test.js' 'src/**/*.test.js'",
+    "test:integration": "node --test 'src/**/*.integration.js'",
     "release:patch": "npm version patch && git push origin main --tags",
     "release:minor": "npm version minor && git push origin main --tags"
   },
   "files": [
     "bin/",
     "src/",
+    "graphs/",
     "defaults/",
     "README.md",
     "LICENSE"
@@ -32,6 +34,7 @@
     "automation"
   ],
   "dependencies": {
-    "@warpmetrics/warp": "^0.0.20"
+    "@warpmetrics/warp": "^0.0.22",
+    "yaml": "^2.8.2"
   }
 }

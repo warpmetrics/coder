@@ -1,27 +1,47 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRunner } from '../src/runner.js';
+import { GRAPH, STATES } from '../src/machine.js';
 import { OUTCOMES, ACTS } from '../src/names.js';
 
 // ---------------------------------------------------------------------------
 // Mock factory
 // ---------------------------------------------------------------------------
 
+let ocCounter = 0;
+
 function createMocks() {
   const calls = [];
+  ocCounter = 0;
 
   const warp = {
     startPipeline: async (apiKey, opts) => {
       calls.push({ name: 'startPipeline', args: [apiKey, opts] });
       return { runId: 'r1' };
     },
-    createGroup: async (apiKey, opts) => { calls.push({ name: 'createGroup', args: [apiKey, opts] }); return { groupId: 'sg1' }; },
     traceClaudeCall: async () => {},
     recordOutcome: async (apiKey, ids, opts) => {
       calls.push({ name: 'recordOutcome', args: [apiKey, ids, opts] });
       return { id: 'oc1', runOutcomeId: 'roc1', name: opts.step };
     },
-    emitAct: async (apiKey, opts) => { calls.push({ name: 'emitAct', args: [apiKey, opts] }); return { actId: 'next-act-1' }; },
+    // Batch helpers (synchronous — queue without flushing)
+    batchGroup: (apiKey, opts) => {
+      calls.push({ name: 'batchGroup', args: [apiKey, opts] });
+      return { groupId: 'sg1' };
+    },
+    batchOutcome: (apiKey, opts) => {
+      const id = `boc-${++ocCounter}`;
+      calls.push({ name: 'batchOutcome', args: [apiKey, opts] });
+      return { outcomeId: id };
+    },
+    batchAct: (apiKey, opts) => {
+      calls.push({ name: 'batchAct', args: [apiKey, opts] });
+      return { actId: 'next-act-1' };
+    },
+    batchFlush: async (apiKey) => {
+      calls.push({ name: 'batchFlush', args: [apiKey] });
+    },
+    // Legacy (used by poll for abort/done)
     recordIssueOutcome: async (apiKey, opts) => {
       calls.push({ name: 'recordIssueOutcome', args: [apiKey, opts] });
       return { outcomeId: `ioc-${calls.length}` };
@@ -39,7 +59,19 @@ function createMocks() {
     getAllItems: async () => [],
   };
 
-  const codehost = {};
+  const git = {};
+  const prs = {};
+  const issues = {};
+  const notify = {};
+
+  const claudeCode = {
+    forRun: (pipelineRunId) => ({
+      run: async () => ({ result: '', costUsd: 0, trace: null, sessionId: null }),
+      oneShot: async () => ({ result: '', costUsd: 0 }),
+    }),
+    run: async () => ({ result: '', costUsd: 0, trace: null, sessionId: null }),
+    oneShot: async () => ({ result: '', costUsd: 0 }),
+  };
 
   const config = {
     repoNames: ['owner/repo'],
@@ -51,7 +83,7 @@ function createMocks() {
   const effects = {};
   const logs = [];
 
-  return { warp, board, codehost, config, execute, effects, calls, logs,
+  return { warp, board, git, prs, issues, notify, claudeCode, config, graph: GRAPH, states: STATES, execute, effects, calls, logs,
     log: (id, msg) => logs.push({ id, msg }) };
 }
 
@@ -74,9 +106,9 @@ function makeRun(overrides = {}) {
   };
 }
 
-// Helper: filter recordIssueOutcome calls
-function issueOutcomes(calls) {
-  return calls.filter(c => c.name === 'recordIssueOutcome');
+// Helper: filter batchOutcome calls
+function batchOutcomes(calls) {
+  return calls.filter(c => c.name === 'batchOutcome');
 }
 
 // Helper to run a single processRun via poll
@@ -85,6 +117,8 @@ async function runSingle(m, run) {
   const runner = createRunner({ ...m, log: m.log });
   await runner.poll();
   await runner.waitForInFlight();
+  // Let fire-and-forget board sync promises resolve.
+  await new Promise(r => setTimeout(r, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -97,18 +131,18 @@ describe('phase group auto-transition', () => {
     const m = createMocks();
     await runSingle(m, makeRun());
 
-    const group = m.calls.find(c => c.name === 'createGroup');
+    const group = m.calls.find(c => c.name === 'batchGroup');
     assert.ok(group, 'should create group');
     assert.equal(group.args[1].runId, 'run-1');
     assert.equal(group.args[1].label, 'Build');
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     assert.ok(ocs.length >= 1);
     // First outcome on group
     assert.equal(ocs[0].args[1].name, OUTCOMES.BUILDING);
     assert.equal(ocs[0].args[1].runId, 'sg1');
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.ok(emitAct);
     assert.equal(emitAct.args[1].name, ACTS.IMPLEMENT);
 
@@ -116,6 +150,9 @@ describe('phase group auto-transition', () => {
     const boardSync = ocs.find(c => c.args[1].runId === 'run-1');
     assert.ok(boardSync, 'should record on Issue Run for board sync');
     assert.equal(boardSync.args[1].name, OUTCOMES.BUILDING);
+
+    // Flush called
+    assert.ok(m.calls.find(c => c.name === 'batchFlush'), 'should flush');
   });
 
   it('REVIEW act creates group, records REVIEWING, emits EVALUATE', async () => {
@@ -125,10 +162,10 @@ describe('phase group auto-transition', () => {
       pendingAct: { id: 'act-2', name: ACTS.REVIEW, opts: { prs: [], release: [] } },
     }));
 
-    const group = m.calls.find(c => c.name === 'createGroup');
+    const group = m.calls.find(c => c.name === 'batchGroup');
     assert.equal(group.args[1].label, 'Review');
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.EVALUATE);
   });
 
@@ -139,10 +176,10 @@ describe('phase group auto-transition', () => {
       pendingAct: { id: 'act-5', name: ACTS.DEPLOY, opts: { prs: [], release: [] } },
     }));
 
-    const group = m.calls.find(c => c.name === 'createGroup');
+    const group = m.calls.find(c => c.name === 'batchGroup');
     assert.equal(group.args[1].label, 'Deploy');
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.AWAIT_DEPLOY);
   });
 
@@ -153,10 +190,10 @@ describe('phase group auto-transition', () => {
       pendingAct: { id: 'act-7', name: ACTS.RELEASE, opts: { prs: [], release: [] } },
     }));
 
-    const group = m.calls.find(c => c.name === 'createGroup');
+    const group = m.calls.find(c => c.name === 'batchGroup');
     assert.equal(group.args[1].label, 'Release');
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.PUBLISH);
   });
 });
@@ -179,7 +216,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Build',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     // Should record on Build group first, then Issue Run
     const buildOc = ocs.find(c => c.args[1].runId === 'build-group-1');
     assert.ok(buildOc, 'should record PR_CREATED on Build group');
@@ -189,7 +226,7 @@ describe('processRun (act-driven)', () => {
     assert.ok(issueOc, 'should record PR_CREATED on Issue Run');
     assert.equal(issueOc.args[1].name, OUTCOMES.PR_CREATED);
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.REVIEW);
 
     const sync = m.calls.findLast(c => c.name === 'syncState');
@@ -208,7 +245,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Build',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     // Within-phase: recorded on Build group
     const groupOc = ocs.find(c => c.args[1].runId === 'build-group-1');
     assert.ok(groupOc);
@@ -219,7 +256,7 @@ describe('processRun (act-driven)', () => {
     assert.ok(issueOc, 'should board-sync on Issue Run');
     assert.equal(issueOc.args[1].name, OUTCOMES.PAUSED);
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.IMPLEMENT);
     assert.equal(emitAct.args[1].opts.sessionId, 'sess1');
   });
@@ -239,7 +276,7 @@ describe('processRun (act-driven)', () => {
     }));
 
     assert.ok(effectCalled);
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.AWAIT_REPLY);
   });
 
@@ -254,12 +291,12 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Build',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     // Terminal: no 'in' → Issue Run
     assert.equal(ocs[0].args[1].name, OUTCOMES.IMPLEMENTATION_FAILED);
     assert.equal(ocs[0].args[1].runId, 'run-1');
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct, undefined);
 
     const sync = m.calls.findLast(c => c.name === 'syncState');
@@ -279,12 +316,12 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Review',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     const groupOc = ocs.find(c => c.args[1].runId === 'review-group-1');
     assert.ok(groupOc);
     assert.equal(groupOc.args[1].name, OUTCOMES.APPROVED);
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.MERGE);
   });
 
@@ -301,7 +338,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Review',
     }));
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.REVISE);
   });
 
@@ -318,11 +355,11 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Review',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     const groupOc = ocs.find(c => c.args[1].runId === 'review-group-1');
     assert.equal(groupOc.args[1].name, OUTCOMES.FAILED);
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.EVALUATE);
   });
 
@@ -339,12 +376,12 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Build',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     const groupOc = ocs.find(c => c.args[1].runId === 'build-group-1');
     assert.ok(groupOc);
     assert.equal(groupOc.args[1].name, OUTCOMES.CLARIFIED);
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.IMPLEMENT);
   });
 
@@ -361,7 +398,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Review',
     }));
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.EVALUATE);
   });
 
@@ -379,7 +416,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Review',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     assert.equal(ocs[0].args[1].name, OUTCOMES.REVISION_FAILED);
     assert.ok(effectCalled);
   });
@@ -399,7 +436,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Review',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     const reviewOc = ocs.find(c => c.args[1].runId === 'review-group-1');
     assert.ok(reviewOc, 'should record MERGED on Review group');
     assert.equal(reviewOc.args[1].name, OUTCOMES.MERGED);
@@ -410,7 +447,7 @@ describe('processRun (act-driven)', () => {
 
     assert.ok(effectCalled);
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.DEPLOY);
   });
 
@@ -426,7 +463,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Review',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     assert.equal(ocs[0].args[1].name, OUTCOMES.MERGE_FAILED);
   });
 
@@ -443,7 +480,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Deploy',
     }));
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.RUN_DEPLOY);
   });
 
@@ -460,14 +497,14 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Deploy',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     const deployOc = ocs.find(c => c.args[1].runId === 'deploy-group-1');
     assert.ok(deployOc, 'should record DEPLOYED on Deploy group');
 
     const issueOc = ocs.find(c => c.args[1].runId === 'run-1');
     assert.ok(issueOc, 'should record DEPLOYED on Issue Run');
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.RELEASE);
   });
 
@@ -483,7 +520,7 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Release',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     const releaseOc = ocs.find(c => c.args[1].runId === 'release-group-1');
     assert.ok(releaseOc, 'should record RELEASED on Release group');
 
@@ -491,7 +528,7 @@ describe('processRun (act-driven)', () => {
     assert.ok(issueOc, 'should record RELEASED on Issue Run');
 
     // No next act (terminal)
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct, undefined);
 
     const sync = m.calls.findLast(c => c.name === 'syncState');
@@ -511,12 +548,12 @@ describe('processRun (act-driven)', () => {
       parentEntityLabel: 'Release',
     }));
 
-    const ocs = issueOutcomes(m.calls);
+    const ocs = batchOutcomes(m.calls);
     const groupOc = ocs.find(c => c.args[1].runId === 'release-group-1');
     assert.ok(groupOc);
     assert.equal(groupOc.args[1].name, OUTCOMES.RELEASE_FAILED);
 
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.PUBLISH);
   });
 
@@ -529,7 +566,7 @@ describe('processRun (act-driven)', () => {
     await runner.waitForInFlight();
 
     assert.equal(stats.processing, 0);
-    assert.equal(issueOutcomes(m.calls).length, 0);
+    assert.equal(batchOutcomes(m.calls).length, 0);
   });
 
   it('no board → no syncState call', async () => {
@@ -547,6 +584,7 @@ describe('processRun (act-driven)', () => {
 
     await runner.poll();
     await runner.waitForInFlight();
+    await new Promise(r => setTimeout(r, 0));
 
     assert.equal(m.calls.filter(c => c.name === 'syncState').length, 0);
   });
@@ -642,21 +680,23 @@ describe('poll', () => {
     assert.equal(abortOcs[0].args[1].runId, 'run-1');
   });
 
-  it('findDeployBatch is called for deploy executor and batch passed through', async () => {
+  it('contextProviders: deploy provider is called and batch passed through', async () => {
     const m = createMocks();
-    let batchCalled = false;
+    let providerCalled = false;
     let receivedBatch = null;
     m.execute.deploy = async (run, ctx) => {
-      receivedBatch = ctx.deployBatch;
+      receivedBatch = ctx.context.deployBatch;
       return { type: 'success', costUsd: null, trace: null, outcomeOpts: {},
         nextActOpts: { prs: [], release: [] } };
     };
-    const findDeployBatch = async (run, act) => {
-      batchCalled = true;
-      return { issueIds: [42, 99], issues: [
-        { issueId: 42, runId: 'run-1' },
-        { issueId: 99, runId: 'run-2' },
-      ] };
+    const contextProviders = {
+      deploy: async (run, act) => {
+        providerCalled = true;
+        return { deployBatch: { issueIds: [42, 99], issues: [
+          { issueId: 42, runId: 'run-1' },
+          { issueId: 99, runId: 'run-2' },
+        ] } };
+      },
     };
     m.warp.findOpenIssueRuns = async () => [makeRun({
       latestOutcome: OUTCOMES.DEPLOY_APPROVED,
@@ -664,33 +704,35 @@ describe('poll', () => {
       parentEntityId: 'deploy-group-1',
       parentEntityLabel: 'Deploy',
     })];
-    const runner = createRunner({ ...m, findDeployBatch, log: m.log });
+    const runner = createRunner({ ...m, contextProviders, log: m.log });
     await runner.poll();
     await runner.waitForInFlight();
 
-    assert.ok(batchCalled, 'findDeployBatch should be called');
+    assert.ok(providerCalled, 'deploy context provider should be called');
     assert.ok(receivedBatch, 'deploy executor should receive deployBatch');
     assert.deepEqual(receivedBatch.issueIds, [42, 99]);
   });
 
-  it('findDeployBatch is NOT called for non-deploy executors', async () => {
+  it('contextProviders: not called for non-matching executors', async () => {
     const m = createMocks();
-    let batchCalled = false;
+    let providerCalled = false;
     m.execute.implement = async () => ({
       type: 'success', costUsd: 0, trace: null, outcomeOpts: {},
       nextActOpts: { prs: [], release: [] },
     });
-    const findDeployBatch = async () => { batchCalled = true; return null; };
+    const contextProviders = {
+      deploy: async () => { providerCalled = true; return {}; },
+    };
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
       parentEntityId: 'build-group-1',
       parentEntityLabel: 'Build',
     })];
-    const runner = createRunner({ ...m, findDeployBatch, log: m.log });
+    const runner = createRunner({ ...m, contextProviders, log: m.log });
     await runner.poll();
     await runner.waitForInFlight();
 
-    assert.equal(batchCalled, false, 'findDeployBatch should not be called for implement');
+    assert.equal(providerCalled, false, 'deploy provider should not be called for implement');
   });
 
   it('deploy:success effect receives batchedIssues', async () => {
@@ -735,7 +777,7 @@ describe('poll', () => {
     // latestOutcome should still be set even without board
     // Verified by checking the cross-phase act was emitted (REVIEW),
     // which only happens if latestOutcome is properly tracked
-    const emitAct = m.calls.find(c => c.name === 'emitAct');
+    const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.ok(emitAct, 'should emit next act even without board');
   });
 
@@ -757,9 +799,9 @@ describe('poll', () => {
     }));
 
     assert.ok(effectCtx, 'effect should be called');
-    assert.ok('board' in effectCtx, 'effect context should include board');
-    assert.ok('warp' in effectCtx, 'effect context should include warp');
-    assert.ok('apiKey' in effectCtx, 'effect context should include apiKey');
+    assert.ok('board' in effectCtx.clients, 'effect context should include board');
+    assert.ok('warp' in effectCtx.clients, 'effect context should include warp');
+    assert.ok('config' in effectCtx, 'effect context should include config');
   });
 
   it('waiting acts are capped to prevent flooding', async () => {
@@ -825,7 +867,149 @@ describe('poll', () => {
 
     await runner.poll();
     await runner.waitForInFlight();
+    await new Promise(r => setTimeout(r, 0));
 
     assert.equal(m.calls.filter(c => c.name === 'syncState').length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Custom graph pluggability tests
+// ---------------------------------------------------------------------------
+
+describe('custom graph', () => {
+  it('runs a minimal custom graph with two steps', async () => {
+    const m = createMocks();
+
+    // Minimal graph: Start → Do → Done
+    const customGraph = {
+      'Start': {
+        label: 'Start',
+        executor: null,
+        results: {
+          created: { outcomes: { name: 'Started', in: 'Start', next: 'Do' } },
+        },
+      },
+      'Do': {
+        label: 'Do Work',
+        group: 'Start',
+        executor: 'worker',
+        results: {
+          success: { outcomes: { name: 'Completed' } },
+          error:   { outcomes: { name: 'Failed' } },
+        },
+      },
+    };
+
+    const customStates = {
+      'Started': 'inProgress',
+      'Completed': 'done',
+      'Failed': 'blocked',
+    };
+
+    m.execute.worker = async () => ({
+      type: 'success', costUsd: 0, trace: null, outcomeOpts: {},
+    });
+
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: { id: 'act-1', name: 'Start', opts: {} },
+    })];
+
+    const runner = createRunner({ ...m, graph: customGraph, states: customStates, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+    await new Promise(r => setTimeout(r, 0));
+
+    // Phase group should create the group
+    const group = m.calls.find(c => c.name === 'batchGroup');
+    assert.ok(group, 'should create group for Start phase');
+    assert.equal(group.args[1].label, 'Start');
+
+    // Worker should execute and record Completed
+    const ocs = batchOutcomes(m.calls);
+    const completedOc = ocs.find(c => c.args[1].name === 'Completed');
+    assert.ok(completedOc, 'should record Completed outcome');
+
+    // Board sync to 'done'
+    const sync = m.calls.findLast(c => c.name === 'syncState');
+    assert.equal(sync.args[1], 'done');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resultType enforcement tests
+// ---------------------------------------------------------------------------
+
+describe('resultType enforcement', () => {
+  it('rejects undeclared result type from executor', async () => {
+    const m = createMocks();
+    m.execute.implement = async () => ({
+      type: 'bogus_type', costUsd: 0, trace: null, outcomeOpts: {},
+    });
+    await runSingle(m, makeRun({
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
+      parentEntityId: 'build-group-1',
+      parentEntityLabel: 'Build',
+    }));
+
+    // Should log an error about undeclared result type
+    const errorLog = m.logs.find(l => l.msg.includes('undeclared result type'));
+    assert.ok(errorLog, 'should log error about undeclared result type');
+    assert.ok(errorLog.msg.includes('bogus_type'), 'should mention the bad type');
+    assert.ok(errorLog.msg.includes('implement'), 'should mention the executor');
+
+    // Should NOT record any outcomes (broke out of loop)
+    const ocs = batchOutcomes(m.calls);
+    assert.equal(ocs.length, 0, 'should not record outcomes for undeclared type');
+  });
+
+  it('allows declared result types through', async () => {
+    const m = createMocks();
+    m.execute.implement = async () => ({
+      type: 'error', error: 'planned error', costUsd: null, trace: null, outcomeOpts: {},
+    });
+    await runSingle(m, makeRun({
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
+      parentEntityId: 'build-group-1',
+      parentEntityLabel: 'Build',
+    }));
+
+    // Should NOT log enforcement error
+    const errorLog = m.logs.find(l => l.msg.includes('undeclared result type'));
+    assert.equal(errorLog, undefined, 'should not log enforcement error for valid type');
+
+    // Should record outcome normally
+    const ocs = batchOutcomes(m.calls);
+    assert.ok(ocs.length > 0, 'should record outcomes for valid type');
+  });
+
+  it('enforcement works with custom graph', async () => {
+    const m = createMocks();
+    const customGraph = {
+      'Start': {
+        label: 'Start', executor: null,
+        results: { created: { outcomes: { name: 'Started', in: 'Start', next: 'Do' } } },
+      },
+      'Do': {
+        label: 'Do', group: 'Start', executor: 'worker',
+        results: { success: { outcomes: { name: 'Done' } } },
+      },
+    };
+    const customStates = { 'Started': 'inProgress', 'Done': 'done' };
+
+    m.execute.worker = async () => ({ type: 'failure', costUsd: 0, trace: null, outcomeOpts: {} });
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: { id: 'act-1', name: 'Start', opts: {} },
+    })];
+
+    const runner = createRunner({ ...m, graph: customGraph, states: customStates, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    // 'failure' is not declared for 'worker' (only 'success' is)
+    const errorLog = m.logs.find(l => l.msg.includes('undeclared result type'));
+    assert.ok(errorLog, 'should reject undeclared type in custom graph');
+    assert.ok(errorLog.msg.includes('failure'));
+  });
+});
+
