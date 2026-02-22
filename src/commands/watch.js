@@ -2,6 +2,7 @@
 // All orchestration logic lives in runner.js + machine.js.
 
 import { join } from 'path';
+import { LIMITS } from '../defaults.js';
 import { loadConfig, repoName, CONFIG_DIR } from '../config.js';
 import { createBoard } from '../clients/boards/index.js';
 import { createPRClient } from '../clients/prs/index.js';
@@ -10,10 +11,10 @@ import { createNotifier } from '../clients/notify/index.js';
 import { createGitClient } from '../clients/git.js';
 import { computeDeployBatch } from '../executors/deploy/plan.js';
 import { createBuiltins } from '../workflows/builtins.js';
-import { validateGraph } from '../machine-graph.js';
+import { validateGraph } from '../graph/index.js';
 import * as warp from '../clients/warp.js';
 import { createClaudeCodeClient } from '../clients/claude-code.js';
-import { ACTS } from '../names.js';
+import { ACTS } from '../graph/names.js';
 import { createRunner } from '../runner.js';
 import { listSkills } from '../agent/skills.js';
 
@@ -67,19 +68,19 @@ function createBoardAdapter(board, repoNames) {
     async scanAborted() {
       try {
         const items = board.listAborted ? await board.listAborted() : [];
-        return new Set(items.filter(i => i._issueId).map(i => i._issueId));
+        return new Set(items.filter(i => i._issueId).map(i => `${i.content?.repository || repoNames[0]}#${i._issueId}`));
       } catch { return new Set(); }
     },
     async scanDone() {
       try {
         const items = board.listDone ? await board.listDone() : [];
-        return new Set(items.filter(i => i._issueId).map(i => i._issueId));
+        return new Set(items.filter(i => i._issueId).map(i => `${i.content?.repository || repoNames[0]}#${i._issueId}`));
       } catch { return new Set(); }
     },
     async scanBlocked() {
       try {
         const items = board.listBlocked ? await board.listBlocked() : [];
-        return new Set(items.filter(i => i._issueId).map(i => i._issueId));
+        return new Set(items.filter(i => i._issueId).map(i => `${i.content?.repository || repoNames[0]}#${i._issueId}`));
       } catch { return new Set(); }
     },
   };
@@ -177,7 +178,7 @@ export async function watch() {
   const notify = createNotifier(config);
   const git = createGitClient({ token: config.githubToken });
   const repoNames = config.repos.map(r => repoName(r));
-  const pollInterval = (config.pollInterval || 30) * 1000;
+  const pollInterval = (config.pollInterval || LIMITS.POLL_INTERVAL) * 1000;
   const apiKey = config.warpmetricsApiKey;
 
   const boardAdapter = createBoardAdapter(rawBoard, repoNames);
@@ -214,7 +215,7 @@ export async function watch() {
     log: (issueId, msg) => {
       clearStatus();
       const prefix = issueId ? `[#${issueId}]` : '';
-      console.log(`[${new Date().toISOString()}] ${prefix}${prefix ? ' ' : ''}${msg}`);
+      process.stderr.write(`[${new Date().toISOString()}] ${prefix}${prefix ? ' ' : ''}${msg}\n`);
     },
   });
 
@@ -238,7 +239,7 @@ export async function watch() {
   console.log(`  repos: ${repoNames.join(', ')}`);
   console.log(`  workflow: ${workflowLabel}`);
   console.log(`  concurrency: ${config.concurrency || 1}`);
-  console.log(`  poll interval: ${config.pollInterval || 30}s`);
+  console.log(`  poll interval: ${config.pollInterval || LIMITS.POLL_INTERVAL}s`);
   const skills = listSkills(join(process.cwd(), CONFIG_DIR));
   if (skills.length) console.log(`  skills: ${skills.join(', ')}`);
 
@@ -251,11 +252,15 @@ export async function watch() {
         onBeforeLog: clearStatus,
       });
 
+      clearStatus();
       if (stats.total === 0 && stats.inFlight === 0) {
-        console.log(`[${new Date().toISOString()}] Nothing to do`);
+        process.stderr.write(`[${new Date().toISOString()}] poll: idle\n`);
+      } else {
+        process.stderr.write(`[${new Date().toISOString()}] poll: ${stats.total} open, ${stats.processing} started, ${stats.inFlight} in-flight\n`);
       }
     } catch (err) {
-      console.log(`[${new Date().toISOString()}] Poll error: ${err.message}`);
+      clearStatus();
+      process.stderr.write(`[${new Date().toISOString()}] Poll error: ${err.message}\n`);
     }
 
     if (running) {

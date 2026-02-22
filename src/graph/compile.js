@@ -2,7 +2,7 @@
 // consumed by createRunner() and the derived maps in machine.js.
 // Pure function — no I/O.
 
-import { validateGraph } from '../machine-graph.js';
+import { validateGraph } from './validate.js';
 
 function normalizeOutcome(raw) {
   const out = { name: raw.outcome };

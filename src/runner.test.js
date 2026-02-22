@@ -1,9 +1,9 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRunner } from '../src/runner.js';
-import { GRAPH, STATES } from '../src/machine.js';
-import { OUTCOMES, ACTS } from '../src/names.js';
-import { implement } from '../src/executors/implement/index.js';
+import { createRunner } from './runner.js';
+import { GRAPH, STATES } from './graph/machine.js';
+import { OUTCOMES, ACTS } from './graph/names.js';
+import { implement } from './executors/implement/index.js';
 
 // ---------------------------------------------------------------------------
 // Mock factory
@@ -640,7 +640,7 @@ describe('poll', () => {
   it('abort: records ABORTED outcome when issue is in Aborted column', async () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({ latestOutcome: OUTCOMES.PR_CREATED })];
-    m.board.scanAborted = async () => new Set([42]);
+    m.board.scanAborted = async () => new Set(['owner/repo#42']);
     const runner = createRunner({ ...m, log: m.log });
 
     await runner.poll();
@@ -745,9 +745,6 @@ describe('poll', () => {
     await runner.poll();
     await runner.waitForInFlight();
 
-    // latestOutcome should still be set even without board
-    // Verified by checking the cross-phase act was emitted (REVIEW),
-    // which only happens if latestOutcome is properly tracked
     const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.ok(emitAct, 'should emit next act even without board');
   });
@@ -783,7 +780,6 @@ describe('poll', () => {
       return { type: 'waiting' };
     };
 
-    // Create 15 waiting runs (more than default cap of max(1*5, 10) = 10)
     const runs = [];
     for (let i = 0; i < 15; i++) {
       runs.push(makeRun({
@@ -800,7 +796,6 @@ describe('poll', () => {
     await runner.poll();
     await runner.waitForInFlight();
 
-    // With concurrency=1, maxWaiting = max(1*5, 10) = 10, so at most 10 should be processed
     assert.ok(callCount <= 10, `expected at most 10 waiting acts processed, got ${callCount}`);
     assert.ok(callCount > 0, 'should process some waiting acts');
   });
@@ -819,9 +814,43 @@ describe('poll', () => {
       parentEntityLabel: 'Review',
     }));
 
-    // Board sync should still have happened
     const sync = m.calls.findLast(c => c.name === 'syncState');
     assert.ok(sync, 'board sync should happen despite effect error');
+  });
+
+  it('resolved waiting act does not block poll — hands off to work queue', async () => {
+    const m = createMocks();
+    let implementStarted = false;
+    const implementDeferred = {};
+    implementDeferred.promise = new Promise(r => { implementDeferred.resolve = r; });
+
+    m.execute.await_reply = async () => ({
+      type: 'replied', costUsd: null, trace: null, outcomeOpts: {},
+      nextActOpts: {},
+    });
+    m.execute.implement = async () => {
+      implementStarted = true;
+      await implementDeferred.promise;
+      return { type: 'success', costUsd: 0, trace: null, outcomeOpts: {}, nextActOpts: {} };
+    };
+
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      latestOutcome: OUTCOMES.NEEDS_CLARIFICATION,
+      pendingAct: { id: 'act-3', name: ACTS.AWAIT_REPLY, opts: {} },
+      parentEntityId: 'build-group-1',
+      parentEntityLabel: 'Build',
+    })];
+    const runner = createRunner({ ...m, log: m.log });
+
+    const stats = await runner.poll();
+
+    assert.equal(stats.inFlight, 1, 'implement should be in-flight');
+
+    await new Promise(r => setTimeout(r, 10));
+    assert.ok(implementStarted, 'implement executor should have started');
+
+    implementDeferred.resolve();
+    await runner.waitForInFlight();
   });
 
   it('headless mode: no board operations', async () => {
@@ -852,7 +881,6 @@ describe('custom graph', () => {
   it('runs a minimal custom graph with two steps', async () => {
     const m = createMocks();
 
-    // Minimal graph: Start → Do → Done
     const customGraph = {
       'Start': {
         label: 'Start',
@@ -891,17 +919,14 @@ describe('custom graph', () => {
     await runner.waitForInFlight();
     await new Promise(r => setTimeout(r, 0));
 
-    // Phase group should create the group
     const group = m.calls.find(c => c.name === 'batchGroup');
     assert.ok(group, 'should create group for Start phase');
     assert.equal(group.args[1].label, 'Start');
 
-    // Worker should execute and record Completed
     const ocs = batchOutcomes(m.calls);
     const completedOc = ocs.find(c => c.args[1].name === 'Completed');
     assert.ok(completedOc, 'should record Completed outcome');
 
-    // Board sync to 'done'
     const sync = m.calls.findLast(c => c.name === 'syncState');
     assert.equal(sync.args[1], 'done');
   });
@@ -923,13 +948,11 @@ describe('resultType enforcement', () => {
       parentEntityLabel: 'Build',
     }));
 
-    // Should log an error about undeclared result type
     const errorLog = m.logs.find(l => l.msg.includes('undeclared result type'));
     assert.ok(errorLog, 'should log error about undeclared result type');
     assert.ok(errorLog.msg.includes('bogus_type'), 'should mention the bad type');
     assert.ok(errorLog.msg.includes('implement'), 'should mention the executor');
 
-    // Should NOT record any outcomes (broke out of loop)
     const ocs = batchOutcomes(m.calls);
     assert.equal(ocs.length, 0, 'should not record outcomes for undeclared type');
   });
@@ -945,11 +968,9 @@ describe('resultType enforcement', () => {
       parentEntityLabel: 'Build',
     }));
 
-    // Should NOT log enforcement error
     const errorLog = m.logs.find(l => l.msg.includes('undeclared result type'));
     assert.equal(errorLog, undefined, 'should not log enforcement error for valid type');
 
-    // Should record outcome normally
     const ocs = batchOutcomes(m.calls);
     assert.ok(ocs.length > 0, 'should record outcomes for valid type');
   });
@@ -977,7 +998,6 @@ describe('resultType enforcement', () => {
     await runner.poll();
     await runner.waitForInFlight();
 
-    // 'failure' is not declared for 'worker' (only 'success' is)
     const errorLog = m.logs.find(l => l.msg.includes('undeclared result type'));
     assert.ok(errorLog, 'should reject undeclared type in custom graph');
     assert.ok(errorLog.msg.includes('failure'));
@@ -996,8 +1016,6 @@ describe('retry from blocked', () => {
       nextActOpts: { prs: [{ repo: 'owner/repo', prNumber: 1 }], release: [] },
     });
 
-    // Run blocked with Implementation Failed, no pendingAct.
-    // Board returns empty blocked set → card was moved out of Blocked.
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
       latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
@@ -1010,12 +1028,10 @@ describe('retry from blocked', () => {
     await runner.waitForInFlight();
     await new Promise(r => setTimeout(r, 0));
 
-    // Should record RESUMED outcome on the Build group
     const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
     assert.ok(resumedOc, 'should record RESUMED outcome');
     assert.equal(resumedOc.args[1].runId, 'build-group-1');
 
-    // Should re-emit Implement
     const reEmit = m.calls.find(c => c.name === 'batchAct');
     assert.ok(reEmit, 'should re-emit the act');
     assert.equal(reEmit.args[1].name, ACTS.IMPLEMENT);
@@ -1072,7 +1088,7 @@ describe('retry from blocked', () => {
       latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
       groups: new Map([['Build', 'build-group-1']]),
     })];
-    m.board.scanBlocked = async () => new Set([42]);
+    m.board.scanBlocked = async () => new Set(['owner/repo#42']);
 
     const runner = createRunner({ ...m, log: m.log });
     await runner.poll();
@@ -1084,7 +1100,6 @@ describe('retry from blocked', () => {
 
   it('does not retry when issue is already in-flight', async () => {
     const m = createMocks();
-    // Hang the implement executor so the run stays in-flight
     let resolveExecutor;
     m.execute = { implement: () => new Promise(resolve => { resolveExecutor = resolve; }) };
     m.warp.findOpenIssueRuns = async () => [makeRun({
@@ -1095,16 +1110,14 @@ describe('retry from blocked', () => {
     m.board.scanBlocked = async () => new Set();
 
     const runner = createRunner({ ...m, log: m.log });
-    await runner.poll(); // first poll: retries, dispatches implement, now in-flight
+    await runner.poll();
 
-    // Second poll while first is still running
-    m.calls.length = 0; // clear call log
+    m.calls.length = 0;
     await runner.poll();
 
     const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
     assert.equal(resumedOc, undefined, 'should not retry when issue is in-flight');
 
-    // Clean up: resolve the executor so waitForInFlight doesn't hang
     resolveExecutor?.({ type: 'success' });
     await runner.waitForInFlight();
   });
@@ -1129,7 +1142,7 @@ describe('retry from blocked', () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
-      latestOutcome: OUTCOMES.PR_CREATED, // not a terminal failure
+      latestOutcome: OUTCOMES.PR_CREATED,
       groups: new Map([['Build', 'build-group-1']]),
     })];
     m.board.scanBlocked = async () => new Set();
@@ -1189,7 +1202,7 @@ describe('retry from blocked', () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
-      latestOutcome: OUTCOMES.REVIEW_FAILED, // review max_retries terminal outcome
+      latestOutcome: OUTCOMES.REVIEW_FAILED,
       groups: new Map([['Review', 'review-group-1']]),
     })];
     m.board.scanBlocked = async () => new Set();
@@ -1277,8 +1290,6 @@ describe('implement short-circuit when PRs exist', () => {
       resumeSession: 'existing-session-id',
     };
 
-    // With resumeSession, it should NOT short-circuit. It will proceed and
-    // eventually fail (since mocks are minimal), but findAllPRs should not be called.
     try { await implement(item, ctx); } catch {}
     assert.equal(findAllPRsCalled, false, 'should not call findAllPRs when resumeSession is set');
   });
@@ -1313,10 +1324,7 @@ describe('implement short-circuit when PRs exist', () => {
       resumeSession: undefined,
     };
 
-    // No PRs found, so it should proceed to Claude (which will be called)
-    // It will error at pushAndCreatePRs but Claude should be called
     try { await implement(item, ctx); } catch {}
     assert.equal(claudeCalled, true, 'should call Claude when no existing PRs');
   });
 });
-

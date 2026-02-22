@@ -14,7 +14,7 @@ import { topoSort, mergeDAGs, buildSteps } from '../executors/deploy/plan.js';
 import { rawRun } from '../clients/claude-code.js';
 import { createChangelogProvider, generateChangelogEntry } from '../executors/release/changelog.js';
 import { PUBLIC_CHANGELOG as PUBLIC_PROMPT, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from '../executors/release/prompt.js';
-import { OUTCOMES } from '../names.js';
+import { OUTCOMES } from '../graph/names.js';
 
 const prs = createPRClient();
 

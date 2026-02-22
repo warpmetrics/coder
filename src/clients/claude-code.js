@@ -1,8 +1,9 @@
 // Claude Code client — subprocess runner, trace builder, and pipeline-scoped wrapper.
 
 import { spawn } from 'child_process';
+import { TIMEOUTS } from '../defaults.js';
 
-const DEFAULT_TIMEOUT = 60 * 60 * 1000; // 60 minutes
+const DEFAULT_TIMEOUT = TIMEOUTS.CLAUDE;
 
 // ---------------------------------------------------------------------------
 // Raw subprocess runner
@@ -45,7 +46,7 @@ export function rawRun({ prompt, workdir, allowedTools, disallowedTools, maxTurn
 
     const timer = timeout ? setTimeout(() => {
       proc.kill('SIGTERM');
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, TIMEOUTS.SIGKILL_GRACE);
       settle(() => reject(new Error(`Claude timed out after ${Math.round(timeout / 1000)}s`)));
     }, timeout) : null;
 
@@ -164,20 +165,33 @@ export function createClaudeCodeClient({ warp, apiKey, config }) {
 
   async function run({ prompt, workdir, pipelineRunId, ...opts }) {
     const start = Date.now();
-    const result = await rawRun({
-      prompt,
-      workdir: workdir || process.cwd(),
-      allowedTools: opts.allowedTools ?? config.claude?.allowedTools,
-      disallowedTools: opts.disallowedTools,
-      maxTurns: opts.maxTurns ?? config.claude?.maxTurns,
-      resume: opts.resume,
-      jsonSchema: opts.jsonSchema,
-      noSessionPersistence: opts.noSessionPersistence,
-      timeout: opts.timeout,
-      logPrefix: opts.logPrefix,
-      onBeforeLog: opts.onBeforeLog,
-      verbose: opts.verbose,
-    });
+    let result;
+    try {
+      result = await rawRun({
+        prompt,
+        workdir: workdir || process.cwd(),
+        allowedTools: opts.allowedTools ?? config.claude?.allowedTools,
+        disallowedTools: opts.disallowedTools,
+        maxTurns: opts.maxTurns ?? config.claude?.maxTurns,
+        resume: opts.resume,
+        jsonSchema: opts.jsonSchema,
+        noSessionPersistence: opts.noSessionPersistence,
+        timeout: opts.timeout,
+        logPrefix: opts.logPrefix,
+        onBeforeLog: opts.onBeforeLog,
+        verbose: opts.verbose,
+      });
+    } catch (err) {
+      if (pipelineRunId && apiKey) {
+        const trace = buildTrace({ costUsd: 0, result: null, subtype: 'error' }, start, { prompt });
+        if (trace) {
+          trace.status = 'error';
+          trace.error = err.message;
+          try { await warp.traceClaudeCall(apiKey, pipelineRunId, trace); } catch {}
+        }
+      }
+      throw err;
+    }
 
     const trace = buildTrace(result, start, { prompt });
     if (pipelineRunId && apiKey && trace) {

@@ -1,7 +1,15 @@
 // Prompt templates for the implement executor.
 
+import { z } from 'zod';
+
+export const IntentSchema = z.object({
+  intent: z.enum(['PROPOSE', 'IMPLEMENT']).describe('PROPOSE = analysis/plan/discussion first. IMPLEMENT = direct feature request, bug fix, or instruction to build.'),
+});
+
+export const INTENT_SCHEMA = z.toJSONSchema(IntentSchema);
+
 export function classifyIntentPrompt(message) {
-  return `Classify this message's intent. Reply with exactly one word: PROPOSE or IMPLEMENT.
+  return `Classify this message's intent.
 
 PROPOSE = the user asks for analysis, review, proposal, plan, or discussion BEFORE making changes. They want to talk first.
 IMPLEMENT = direct feature requests, bug fixes, confirmations, approvals, or instructions to build/change/add something.

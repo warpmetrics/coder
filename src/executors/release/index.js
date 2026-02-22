@@ -3,7 +3,7 @@
 
 import { generateChangelogEntry, createChangelogProvider } from './changelog.js';
 import { PUBLIC_CHANGELOG as PUBLIC_PROMPT, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from './prompt.js';
-import { OUTCOMES } from '../../names.js';
+import { OUTCOMES } from '../../graph/names.js';
 
 export const definition = {
   name: 'release',

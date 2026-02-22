@@ -3,6 +3,8 @@
 
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { TIMEOUTS } from '../../defaults.js';
+import { CHANGELOG_ENTRY_SCHEMA, ChangelogEntrySchema } from './prompt.js';
 
 // ---------------------------------------------------------------------------
 // Entry generation (shared helper)
@@ -10,16 +12,21 @@ import { join } from 'path';
 
 export async function generateChangelogEntry(claudeCode, prompt) {
   try {
-    const { result, costUsd } = await claudeCode.run({ prompt, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: 60000, verbose: false });
+    const res = await claudeCode.run({ prompt, jsonSchema: CHANGELOG_ENTRY_SCHEMA, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
 
-    const jsonMatch = result.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
+    // Prefer structured output from the schema.
+    let parsed = res.structuredOutput;
+    if (!parsed) {
+      // Fallback: parse from text.
+      const raw = typeof res.result === 'string' ? (() => { try { const m = res.result.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null; } catch { return null; } })() : res.result;
+      const validated = ChangelogEntrySchema.safeParse(raw);
+      parsed = validated?.success ? validated.data : null;
+    }
 
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (!parsed.title || !parsed.entry) return null;
-    return { ...parsed, costUsd };
+    if (!parsed?.title || !parsed?.entry) return null;
+    return { ...parsed, costUsd: res.costUsd };
   } catch (err) {
-    console.log(`  changelog entry generation error: ${err.message}`);
+    // Caller handles null return — swallow error silently
     return null;
   }
 }

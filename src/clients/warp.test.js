@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateId } from '../src/clients/warp.js';
+import { generateId } from './warp.js';
 
 describe('generateId', () => {
   it('starts with wm_ prefix', () => {

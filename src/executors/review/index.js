@@ -5,8 +5,9 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { mkdirSync, existsSync } from 'fs';
 import { repoName, deriveRepoDirNames, CONFIG_DIR } from '../../config.js';
+import { LIMITS } from '../../defaults.js';
 import { fetchComments } from '../../clients/claude-code.js';
-import { buildReviewPrompt, REVIEW_SCHEMA } from './prompt.js';
+import { buildReviewPrompt, REVIEW_SCHEMA, ReviewVerdictSchema } from './prompt.js';
 import { installSkills } from '../../agent/skills.js';
 
 export const definition = {
@@ -18,17 +19,15 @@ export const definition = {
       const item = run.boardItem || { _issueId: run.issueId, content: { title: run.title } };
       const r = await review(item, { config, clients, context });
 
-      if (r.type === 'approved') {
-        return { ...r, outcomeOpts: { prNumber: r.prNumber, reviewCommentCount: r.commentCount },
-          nextActOpts: { prs: r.prs, release: context.actOpts?.release, sessionId: context.actOpts?.sessionId } };
-      }
-      if (r.type === 'changes_requested') {
-        return { ...r, outcomeOpts: { prNumber: r.prNumber, reviewCommentCount: r.commentCount },
+      if (r.type === 'approved' || r.type === 'changes_requested') {
+        const outcomeOpts = { prNumber: r.prNumber, reviewCommentCount: r.commentCount };
+        if (r.parseFailed) { outcomeOpts.parseFailed = true; outcomeOpts.claudeOutput = r.claudeOutput; }
+        return { ...r, outcomeOpts,
           nextActOpts: { prs: r.prs, release: context.actOpts?.release, sessionId: context.actOpts?.sessionId } };
       }
       if (r.type === 'error') {
         const retryCount = (context.actOpts?.reviewRetryCount || 0) + 1;
-        const limit = config.claude?.reviewMaxRetries || 3;
+        const limit = config.claude?.reviewMaxRetries || LIMITS.MAX_REVIEW_RETRIES;
         if (retryCount >= limit) {
           context.log(`review failed ${retryCount} times, giving up`);
           return { ...r, type: 'max_retries', outcomeOpts: { prNumber: r.prNumber },
@@ -112,23 +111,28 @@ export async function review(item, ctx) {
       workdir, repoDirs, issueId, issueTitle, issueBody, commentsText,
     });
 
-    const maxTurns = config.claude?.reviewMaxTurns || 50;
+    const maxTurns = config.claude?.reviewMaxTurns || LIMITS.MAX_REVIEW_TURNS;
     const result = await claudeCode.run({
       prompt, workdir, maxTurns,
+      jsonSchema: REVIEW_SCHEMA,
       disallowedTools: ['Edit', 'Write', 'NotebookEdit', 'Bash(gh *)'],
-      logPrefix: `[#${issueId} review] `, onBeforeLog,
+      logPrefix: `[#${issueId}] [review]`, onBeforeLog,
     });
     log(`  claude done (cost: $${result.costUsd ?? '?'})`);
 
     // 5. Parse JSON verdict from output
-    let reviewData = null;
-    try {
-      reviewData = JSON.parse(result.result);
-    } catch {
-      reviewData = extractReviewJson(result.result);
+    let raw = result.structuredOutput;
+    if (!raw) {
+      try { raw = JSON.parse(result.result); } catch { raw = extractReviewJson(result.result); }
     }
 
-    if (!reviewData || !reviewData.verdict) {
+    let parseFailed = false;
+    const parsed = raw ? ReviewVerdictSchema.safeParse(raw) : null;
+    let reviewData;
+    if (parsed?.success) {
+      reviewData = parsed.data;
+    } else {
+      parseFailed = true;
       log('  warning: could not parse verdict JSON, using conservative fallback');
       reviewData = {
         verdict: 'request_changes',
@@ -176,10 +180,15 @@ export async function review(item, ctx) {
     const prNumber = repoDirs[0]?.prNumber;
     const commentCount = comments.length;
     const resultPrs = repoDirs.map(r => ({ repo: r.name, prNumber: r.prNumber }));
+    const base = { costUsd: result.costUsd, trace: result.trace, prNumber, commentCount, prs: resultPrs };
+    if (parseFailed) {
+      base.parseFailed = true;
+      base.claudeOutput = result.result || '';
+    }
     if (verdict === 'approve') {
-      return { type: 'approved', costUsd: result.costUsd, trace: result.trace, prNumber, commentCount, prs: resultPrs };
+      return { type: 'approved', ...base };
     } else {
-      return { type: 'changes_requested', costUsd: result.costUsd, trace: result.trace, prNumber, commentCount, prs: resultPrs };
+      return { type: 'changes_requested', ...base };
     }
   } catch (err) {
     return { type: 'error', error: err.message, costUsd: null, trace: null };
@@ -187,24 +196,33 @@ export async function review(item, ctx) {
 }
 
 // Fallback: extract JSON from text when structured_output is not available.
-function extractReviewJson(text) {
+// The verdict JSON may contain embedded markdown code fences (e.g. ```js
+// inside comment bodies), so we can't rely on lazy regex to find the closing
+// fence. Instead we find the opening { after the last ```json marker and
+// use brace-depth matching to extract the complete JSON object.
+export function extractReviewJson(text) {
   if (!text) return null;
 
-  // Try last ```json ... ``` fenced block
-  const fenceMatches = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
-  if (fenceMatches.length > 0) {
-    try { return JSON.parse(fenceMatches[fenceMatches.length - 1][1]); } catch {}
-  }
+  // Find the start of the JSON object — prefer last ```json fence, fall back to last {
+  let searchFrom = 0;
+  const lastFence = text.lastIndexOf('```json');
+  if (lastFence !== -1) searchFrom = lastFence;
 
-  // Try last { ... } block
-  const lastBrace = text.lastIndexOf('{');
-  if (lastBrace !== -1) {
-    const rest = text.slice(lastBrace);
-    let depth = 0;
-    for (let i = 0; i < rest.length; i++) {
-      if (rest[i] === '{') depth++;
-      else if (rest[i] === '}') { depth--; if (depth === 0) { try { return JSON.parse(rest.slice(0, i + 1)); } catch { break; } } }
-    }
+  const braceStart = text.indexOf('{', searchFrom);
+  if (braceStart === -1) return null;
+
+  const rest = text.slice(braceStart);
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { try { return JSON.parse(rest.slice(0, i + 1)); } catch { return null; } } }
   }
 
   return null;

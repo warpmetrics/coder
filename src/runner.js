@@ -2,7 +2,9 @@
 // runs executors, records outcomes, emits next acts, syncs board.
 // All adapters injected via constructor.
 
-import { OUTCOMES } from './names.js';
+import { OUTCOMES } from './graph/names.js';
+import { CONCURRENCY, LIMITS } from './defaults.js';
+import { normalizeOutcomes } from './graph/index.js';
 
 // ---------------------------------------------------------------------------
 // resolveContainer — maps an 'in' label to a container ID.
@@ -20,10 +22,6 @@ function resolveContainer(inLabel, run, logFn) {
     return run.id;
   }
   return groupId;
-}
-
-function normalizeOutcomes(outcomes) {
-  return Array.isArray(outcomes) ? outcomes : [outcomes];
 }
 
 export function createRunner({ warp, board, git, prs, issues, notify, config, claudeCode, graph, states, execute, effects, contextProviders, log: logFn }) {
@@ -96,7 +94,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
         repo: run.repo, issueNumber: run.issueId,
         issueTitle: run.title, refActId: act.id,
       });
-      log(run.issueId, `pipeline: run=${p.runId}`);
+      log(run.issueId, `[${executorName}] pipeline: run=${p.runId}`);
       return p.runId;
     } catch (err) {
       log(run.issueId, `warning: pipeline start failed: ${err.message}`);
@@ -111,12 +109,12 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       costUsd: result.costUsd, error: result.type === 'error' ? result.error : undefined,
       ...result.outcomeOpts,
     };
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < LIMITS.MAX_RETRIES; attempt++) {
       try {
         await warp.recordOutcome(apiKey, { runId: pipelineRunId }, opts);
         return;
       } catch (err) {
-        if (attempt < 2) {
+        if (attempt < LIMITS.MAX_RETRIES - 1) {
           await new Promise(r => setTimeout(r, 5000 * (attempt + 1)));
         } else {
           log(run.issueId, `warning: outcome recording failed: ${err.message}`);
@@ -144,6 +142,8 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       // ── Step 1: Produce result ──────────────────────────────────
       let result;
       let executorName = node.executor;
+
+      let resolvedFromWait = false;
 
       if (executorName === null) {
         // Phase group: create group, auto-resolve to 'created'.
@@ -201,6 +201,8 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
         }
 
         if (result.type === 'waiting') break;
+
+        resolvedFromWait = canWait;
 
         // Create pipeline retroactively for waiting-capable executors that resolved.
         if (!pipelineRunId) pipelineRunId = await startPipeline(executorName, run, act);
@@ -277,6 +279,14 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       // ── Step 6: Continue or break ──────────────────────────────
       run.latestOutcome = boardOutcomeName;
       if (!nextAct) break;
+
+      // When a waiting act resolves, hand the next act to the work loop
+      // instead of chaining inline — avoids blocking the poll for minutes.
+      if (resolvedFromWait) {
+        run.pendingAct = nextAct;
+        break;
+      }
+
       act = nextAct;
     }
 
@@ -299,6 +309,14 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       }
     }
 
+    // Pre-fetch Done/Aborted sets so intake can skip issues that would be immediately closed.
+    let doneIds = new Set();
+    let abortedIds = new Set();
+    if (board) {
+      try { if (board.scanDone) doneIds = await board.scanDone(); } catch {}
+      try { if (board.scanAborted) abortedIds = await board.scanAborted(); } catch {}
+    }
+
     // Intake: discover new issues from board, skip those with existing runs.
     if (board) {
       try {
@@ -306,6 +324,8 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
         const newIssues = await board.scanNewIssues();
         for (const issue of newIssues) {
           if (existingIssueIds.has(issue.issueId)) continue;
+          const boardKey = `${issue.repo || repoNames[0]}#${issue.issueId}`;
+          if (doneIds.has(boardKey) || abortedIds.has(boardKey)) continue;
           if (apiKey) {
             try {
               const { runId } = await warp.createIssueRun(apiKey, {
@@ -344,43 +364,38 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
     }
 
     // Abort: if a run's issue is in the board's Aborted column, close the run.
-    if (board?.scanAborted && apiKey) {
-      try {
-        const abortedIds = await board.scanAborted();
-        if (abortedIds.size > 0) {
-          for (let i = openRuns.length - 1; i >= 0; i--) {
-            const run = openRuns[i];
-            if (!run.issueId || !abortedIds.has(run.issueId)) continue;
-            try {
-              await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.ABORTED });
-              log(run.issueId, `aborted (moved to Aborted column)`);
-            } catch (err) {
-              log(run.issueId, `warning: abort failed: ${err.message}`);
-            }
-            openRuns.splice(i, 1);
+    if (apiKey && abortedIds.size > 0) {
+      for (let i = openRuns.length - 1; i >= 0; i--) {
+        const run = openRuns[i];
+        if (!run.issueId || !abortedIds.has(`${run.repo || repoNames[0]}#${run.issueId}`)) continue;
+        try {
+          await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.ABORTED });
+          try {
+            issues.closeIssue(run.issueId, { repo: run.repo || repoNames[0], reason: 'not planned' });
+            log(run.issueId, `aborted — issue closed`);
+          } catch (err) {
+            log(run.issueId, `aborted (could not close issue: ${err.message})`);
           }
+        } catch (err) {
+          log(run.issueId, `warning: abort failed: ${err.message}`);
         }
-      } catch (err) { log(null, `warning: scan aborted failed: ${err.message}`); }
+        openRuns.splice(i, 1);
+      }
     }
 
     // Done: if a run's issue is manually moved to Done, close the run.
-    if (board?.scanDone && apiKey) {
-      try {
-        const doneIds = await board.scanDone();
-        if (doneIds.size > 0) {
-          for (let i = openRuns.length - 1; i >= 0; i--) {
-            const run = openRuns[i];
-            if (!run.issueId || !doneIds.has(run.issueId)) continue;
-            try {
-              await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.MANUAL_RELEASE });
-              log(run.issueId, `shipped (moved to Done column)`);
-            } catch (err) {
-              log(run.issueId, `warning: ship failed: ${err.message}`);
-            }
-            openRuns.splice(i, 1);
-          }
+    if (apiKey && doneIds.size > 0) {
+      for (let i = openRuns.length - 1; i >= 0; i--) {
+        const run = openRuns[i];
+        if (!run.issueId || !doneIds.has(`${run.repo || repoNames[0]}#${run.issueId}`)) continue;
+        try {
+          await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.MANUAL_RELEASE });
+          log(run.issueId, `shipped (moved to Done column)`);
+        } catch (err) {
+          log(run.issueId, `warning: ship failed: ${err.message}`);
         }
-      } catch (err) { log(null, `warning: scan done failed: ${err.message}`); }
+        openRuns.splice(i, 1);
+      }
     }
 
     // Retry: re-emit last act when card leaves Blocked column.
@@ -393,7 +408,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
           if (!run.issueId) continue;
           if (inFlight.has(run.issueId)) continue;
           if (retriedIds.has(run.issueId)) continue;
-          if (blockedIds.has(run.issueId)) continue;
+          if (blockedIds.has(`${run.repo || repoNames[0]}#${run.issueId}`)) continue;
 
           // Derive retry target from graph using the run's latest outcome.
           const target = retryTargets[run.latestOutcome];
@@ -439,14 +454,23 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       (isWaiting ? waitingActs : workActs).push(run);
     }
 
-    const maxWaiting = Math.max(concurrency * 5, 10);
+    const maxWaiting = Math.max(concurrency * CONCURRENCY.WAITING_MULTIPLIER, CONCURRENCY.WAITING_MIN);
     for (const run of waitingActs.slice(0, maxWaiting)) {
+      const prevActName = run.pendingAct?.name;
       await processRun(run, { onStep, onClearStep, onBeforeLog });
+      // If the waiting act resolved, pendingAct points to the next work act.
+      if (run.pendingAct && run.pendingAct.name !== prevActName) {
+        workActs.push(run);
+      }
     }
 
     // Launch work acts into available slots.
     const available = concurrency - inFlight.size;
     const toProcess = workActs.slice(0, available);
+    const queued = workActs.slice(available);
+    for (const run of queued) {
+      log(run.issueId, `queued (${inFlight.size}/${concurrency} slots in use)`);
+    }
 
     for (const run of toProcess) {
       onStep?.(run.issueId, run.pendingAct.name);

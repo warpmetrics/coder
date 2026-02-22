@@ -1,4 +1,13 @@
 // Release workflow — build deploy plans from config + optional LLM dependency inference.
+import { z } from 'zod';
+import { LIMITS } from '../../defaults.js';
+
+const DeployDependencySchema = z.array(z.object({
+  repo: z.string().describe('Repository name (e.g. "org/api")'),
+  dependsOn: z.array(z.string()).describe('Repos that must deploy before this one'),
+}));
+
+export const DEPLOY_DEPENDENCY_SCHEMA = z.toJSONSchema(DeployDependencySchema);
 
 /**
  * Extract a JSON array from text that may contain markdown fences or surrounding text.
@@ -93,30 +102,36 @@ export async function inferDependencies(claudeCode, sessionId, repos, workdir, {
   const repoList = repos.map(r => `"${r}"`).join(', ');
   const prompt = `The following repos need to be deployed: ${repoList}
 
-Based on the changes you just made, determine the deployment order. For each repo, list which other repos in this set must deploy first (dependsOn).
-
-Respond with ONLY the raw JSON array, no markdown fences, no explanation:
-[{"repo":"org/name","dependsOn":[]}]`;
+Based on the changes you just made, determine the deployment order. For each repo, list which other repos in this set must deploy first (dependsOn).`;
 
   log?.(`  dependency inference: resuming session ${sessionId} for ${repos.length} repos`);
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < LIMITS.MAX_RETRIES; attempt++) {
     let result;
     try {
       result = await claudeCode.run({
         prompt, workdir, resume: sessionId,
-        maxTurns: 5, verbose: false,
+        jsonSchema: DEPLOY_DEPENDENCY_SCHEMA,
+        maxTurns: LIMITS.MAX_INFER_TURNS, verbose: false,
       });
     } catch (err) {
       log?.(`  dependency inference attempt ${attempt + 1}: claude call failed: ${err.message}`);
-      if (attempt < 2) continue;
+      if (attempt < LIMITS.MAX_RETRIES - 1) continue;
       return null;
     }
 
     try {
-      const resultText = result.result;
-      log?.(`  dependency inference attempt ${attempt + 1}: result=${resultText?.slice(0, 200)}`);
-      const parsed = extractJsonArray(resultText);
+      // Prefer structured output from the schema.
+      let parsed = result.structuredOutput;
+      if (!parsed) {
+        // Fallback: extract from text.
+        const raw = extractJsonArray(result.result);
+        const validated = DeployDependencySchema.safeParse(raw);
+        parsed = validated?.success ? validated.data : null;
+      }
+
+      log?.(`  dependency inference attempt ${attempt + 1}: result=${result.result?.slice(0, 200)}`);
+
       if (parsed && Array.isArray(parsed) && parsed.every(d => d.repo)) {
         // Filter to only repos in our set
         const repoSet = new Set(repos);

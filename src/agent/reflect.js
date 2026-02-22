@@ -1,9 +1,17 @@
 import { rawRun, buildTrace } from '../clients/claude-code.js';
 import { loadMemory, saveMemory } from './memory.js';
 import { buildReflectPrompt } from './prompt.js';
+import { TIMEOUTS } from '../defaults.js';
 
 // Serialize concurrent reflect calls so memory file doesn't get corrupted
 let lock = Promise.resolve();
+
+export function reflectOnStep(config, configDir, step, opts, log, claudeCode) {
+  if (config.memory?.enabled === false) return;
+  reflect({ configDir, step, ...opts, hookOutputs: (opts.hookOutputs || []).filter(h => h.ran), maxLines: config.memory?.maxLines || 100, claudeCode })
+    .then(() => log('  reflect: memory updated'))
+    .catch(() => {});
+}
 
 export function reflect(args) {
   const p = lock.then(() => _reflect(args));
@@ -21,7 +29,7 @@ async function _reflect({ configDir, step, issue, prNumber, success, error, hook
 
   let result;
   if (claudeCode) {
-    result = await claudeCode.run({ prompt, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: 60000, verbose: false });
+    result = await claudeCode.run({ prompt, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
   } else {
     result = await rawRun({
       prompt,
@@ -29,7 +37,7 @@ async function _reflect({ configDir, step, issue, prNumber, success, error, hook
       allowedTools: '',
       maxTurns: 1,
       noSessionPersistence: true,
-      timeout: 60000,
+      timeout: TIMEOUTS.CLAUDE_QUICK,
       verbose: false,
     });
   }

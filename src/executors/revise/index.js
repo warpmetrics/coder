@@ -3,33 +3,21 @@
 
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync } from 'fs';
 import { repoName, deriveRepoDirNames, CONFIG_DIR } from '../../config.js';
+import { LIMITS } from '../../defaults.js';
 import * as warp from '../../clients/warp.js';
-import { ACTS } from '../../names.js';
+import { ACTS } from '../../graph/names.js';
 import { safeHook } from '../../agent/hooks.js';
 import { loadMemory } from '../../agent/memory.js';
-import { reflect } from '../../agent/reflect.js';
+import { reflectOnStep } from '../../agent/reflect.js';
 import { buildRevisePrompt } from './prompt.js';
 import { installSkills } from '../../agent/skills.js';
+import { gitExclude } from '../../agent/workspace.js';
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-function reflectOnStep(config, configDir, step, opts, log, claudeCode) {
-  if (config.memory?.enabled === false) return;
-  reflect({ configDir, step, ...opts, hookOutputs: (opts.hookOutputs || []).filter(h => h.ran), maxLines: config.memory?.maxLines || 100, claudeCode })
-    .then(() => log('  reflect: memory updated'))
-    .catch(() => {});
-}
-
-function gitExclude(dir, entries) {
-  const file = join(dir, '.git', 'info', 'exclude');
-  const existing = existsSync(file) ? readFileSync(file, 'utf-8') : '';
-  const additions = entries.filter(e => !existing.includes(e));
-  if (additions.length) writeFileSync(file, existing.trimEnd() + '\n' + additions.join('\n') + '\n');
-}
 
 function pushRevisionChanges(git, repoDirs, headsBefore, log) {
   let any = false;
@@ -64,7 +52,7 @@ function fetchReviews(prsClient, prList, log) {
     }).join('\n\n');
   }
 
-  if (s.length > 20000) s = s.slice(0, 20000) + '\n(truncated)\n';
+  if (s.length > LIMITS.REVIEW_TEXT_TRUNCATE) s = s.slice(0, LIMITS.REVIEW_TEXT_TRUNCATE) + '\n(truncated)\n';
   return { reviewSection: s, reviewComments: reviews };
 }
 
@@ -146,10 +134,10 @@ export async function revise(item, ctx) {
   // Revision limit
   if (config.warpmetricsApiKey && primaryPRNumber) {
     try {
-      const count = await warp.countRevisions(config.warpmetricsApiKey, { prNumber: primaryPRNumber, repo: primaryRepo, since });
-      if (count >= (config.maxRevisions || 3))
+      const count = await warp.countRevisions(config.warpmetricsApiKey, { prNumber: primaryPRNumber, repo: primaryRepo });
+      if (count >= (config.maxRevisions || LIMITS.MAX_REVISIONS))
         return { type: 'max_retries', count, costUsd: null, trace: null };
-      log(`  revision ${count + 1}/${config.maxRevisions || 3}`);
+      log(`  revision ${count + 1}/${config.maxRevisions || LIMITS.MAX_REVISIONS}`);
     } catch (err) { log(`  warning: revision count check failed: ${err.message}`); }
   }
 
@@ -169,6 +157,7 @@ export async function revise(item, ctx) {
       if (pr) {
         if (workdirExists && existsSync(join(dest, '.git'))) {
           // Reuse existing workdir — pull latest changes
+          git.setBotIdentity(dest);
           repoDirs.push({ url, name, dirName, dir: dest, prNumber: pr.prNumber, branch: pr.branch, hasPR: true });
           headsBefore.set(dest, git.getHead(dest));
           log(`  reusing ${name} (branch: ${pr.branch})`);
@@ -196,7 +185,7 @@ export async function revise(item, ctx) {
     onStep?.('claude');
     const result = await claudeCode.run({
       prompt, workdir,
-      resume: resumeSession, logPrefix: `[#${issueId}] `, onBeforeLog,
+      resume: resumeSession, logPrefix: `[#${issueId}] [revise]`, onBeforeLog,
     });
     log(`  claude done (cost: $${result.costUsd ?? '?'})`);
     if (result.hitMaxTurns) throw new Error(`Hit turn limit (${result.numTurns})`);

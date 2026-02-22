@@ -1,12 +1,25 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, NEXT_ACT, STATES,
-} from '../src/machine.js';
-import { OUTCOMES, ACTS } from '../src/names.js';
+import { GRAPH, STATES } from './machine.js';
+import { normalizeOutcomes } from './index.js';
+import { OUTCOMES, ACTS } from './names.js';
 
-function normalizeOutcomes(outcomes) {
-  return Array.isArray(outcomes) ? outcomes : [outcomes];
+// Derive maps from GRAPH (mirrors what runner.js and debug.js do at runtime).
+const ACT_EXECUTOR = Object.fromEntries(
+  Object.entries(GRAPH).filter(([, n]) => n.executor !== null).map(([a, n]) => [a, n.executor])
+);
+const RESULT_EDGES = {};
+const RESULT_OUTCOMES = {};
+const NEXT_ACT = {};
+for (const node of Object.values(GRAPH)) {
+  if (node.executor === null) continue;
+  for (const [resultType, result] of Object.entries(node.results)) {
+    const key = `${node.executor}:${resultType}`;
+    const edges = normalizeOutcomes(result.outcomes);
+    RESULT_EDGES[key] = edges;
+    RESULT_OUTCOMES[key] = edges[edges.length - 1].name;
+    NEXT_ACT[key] = edges.find(e => e.next)?.next || null;
+  }
 }
 
 describe('GRAPH', () => {

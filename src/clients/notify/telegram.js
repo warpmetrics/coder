@@ -7,7 +7,7 @@ const TOPIC_MAP_FILE = 'telegram-topics.json';
 const MAX_MESSAGE_LENGTH = 4096;
 const MAX_TOPIC_NAME_LENGTH = 128;
 
-function githubToTelegramHtml(md) {
+export function githubToTelegramHtml(md) {
   let s = md;
   // Strip HTML comments
   s = s.replace(/<!--[\s\S]*?-->/g, '');
@@ -31,7 +31,7 @@ function githubToTelegramHtml(md) {
   return s;
 }
 
-function escapeHtml(text) {
+export function escapeHtml(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 

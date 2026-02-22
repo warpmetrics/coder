@@ -1,12 +1,26 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { OUTCOMES, ACTS } from '../src/names.js';
+import { OUTCOMES, ACTS } from './names.js';
+import { GRAPH, STATES } from './machine.js';
 import {
-  GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, NEXT_ACT, STATES,
-} from '../src/machine.js';
-import {
-  buildTransitionGraph, findReachableActs, validateGraph, findOrphanOutcomes,
-} from '../src/machine-graph.js';
+  normalizeOutcomes, buildTransitionGraph, findReachableActs, validateGraph, findOrphanOutcomes,
+} from './index.js';
+
+// Derive maps from GRAPH (mirrors what runner.js does at runtime).
+const ACT_EXECUTOR = Object.fromEntries(
+  Object.entries(GRAPH).filter(([, n]) => n.executor !== null).map(([a, n]) => [a, n.executor])
+);
+const RESULT_EDGES = {};
+const NEXT_ACT = {};
+for (const node of Object.values(GRAPH)) {
+  if (node.executor === null) continue;
+  for (const [resultType, result] of Object.entries(node.results)) {
+    const key = `${node.executor}:${resultType}`;
+    const edges = normalizeOutcomes(result.outcomes);
+    RESULT_EDGES[key] = edges;
+    NEXT_ACT[key] = edges.find(e => e.next)?.next || null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Graph consistency
@@ -48,31 +62,31 @@ describe('graph consistency', () => {
   });
 
   it('all acts reachable from BUILD via BFS', () => {
-    const reachable = findReachableActs();
+    const reachable = findReachableActs(ACTS.BUILD, GRAPH);
     for (const actName of Object.keys(GRAPH)) {
       assert.ok(reachable.has(actName), `${actName} is unreachable from BUILD`);
     }
   });
 
   it('all work acts reachable from BUILD via BFS', () => {
-    const reachable = findReachableActs();
+    const reachable = findReachableActs(ACTS.BUILD, GRAPH);
     for (const actName of Object.keys(ACT_EXECUTOR)) {
       assert.ok(reachable.has(actName), `work act ${actName} is unreachable from BUILD`);
     }
   });
 
   it('RESUMED has no producer (external-only outcome)', () => {
-    const orphans = findOrphanOutcomes();
+    const orphans = findOrphanOutcomes(GRAPH, STATES);
     assert.ok(orphans.includes(OUTCOMES.RESUMED), 'RESUMED should be an orphan outcome');
   });
 
   it('STARTED has no producer (external-only outcome)', () => {
-    const orphans = findOrphanOutcomes();
+    const orphans = findOrphanOutcomes(GRAPH, STATES);
     assert.ok(orphans.includes(OUTCOMES.STARTED), 'STARTED should be an orphan outcome');
   });
 
   it('phase group outcomes are not orphans', () => {
-    const orphans = findOrphanOutcomes();
+    const orphans = findOrphanOutcomes(GRAPH, STATES);
     assert.ok(!orphans.includes(OUTCOMES.BUILDING), 'BUILDING should not be orphan');
     assert.ok(!orphans.includes(OUTCOMES.REVIEWING), 'REVIEWING should not be orphan');
     assert.ok(!orphans.includes(OUTCOMES.AWAITING_DEPLOY), 'AWAITING_DEPLOY should not be orphan');
@@ -80,12 +94,12 @@ describe('graph consistency', () => {
   });
 
   it('validateGraph returns ok', () => {
-    const result = validateGraph();
+    const result = validateGraph(GRAPH, STATES);
     assert.ok(result.ok, `Graph validation errors: ${result.errors.join(', ')}`);
   });
 
   it('buildTransitionGraph produces edges for all result types', () => {
-    const { edges } = buildTransitionGraph();
+    const { edges } = buildTransitionGraph(GRAPH);
     assert.ok(edges.length > 0, 'should have edges');
 
     // Every RESULT_EDGES key should appear as a via in the transition graph
@@ -96,7 +110,7 @@ describe('graph consistency', () => {
   });
 
   it('terminal edges have to=TERMINAL', () => {
-    const { edges } = buildTransitionGraph();
+    const { edges } = buildTransitionGraph(GRAPH);
     const terminals = edges.filter(e => e.type === 'terminal');
     for (const e of terminals) {
       assert.equal(e.to, 'TERMINAL', `terminal edge ${e.via} should have to=TERMINAL`);
@@ -104,7 +118,7 @@ describe('graph consistency', () => {
   });
 
   it('transition edges point to valid acts', () => {
-    const { edges } = buildTransitionGraph();
+    const { edges } = buildTransitionGraph(GRAPH);
     const transitions = edges.filter(e => e.type === 'transition');
     for (const e of transitions) {
       assert.ok(e.to in GRAPH, `transition edge ${e.via} points to unknown act ${e.to}`);
@@ -112,7 +126,7 @@ describe('graph consistency', () => {
   });
 
   it('auto-transition edges come from phase groups', () => {
-    const { edges } = buildTransitionGraph();
+    const { edges } = buildTransitionGraph(GRAPH);
     const autoEdges = edges.filter(e => e.type === 'auto');
     assert.ok(autoEdges.length === 4, `should have 4 auto-transition edges, got ${autoEdges.length}`);
     for (const e of autoEdges) {

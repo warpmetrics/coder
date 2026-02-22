@@ -12,10 +12,11 @@ import {
   flush as sdkFlush,
   reserve as sdkReserve,
 } from '@warpmetrics/warp';
-import { OUTCOMES, ACTS, LABELS, CLASSIFICATIONS, VERSION } from '../names.js';
+import { OUTCOMES, ACTS, LABELS, CLASSIFICATIONS, VERSION } from '../graph/names.js';
+import { TIMEOUTS } from '../defaults.js';
 
 const API_URL = 'https://api.warpmetrics.com';
-const FETCH_TIMEOUT = 15_000;
+const FETCH_TIMEOUT = TIMEOUTS.API_FETCH;
 
 // ---------------------------------------------------------------------------
 // SDK initialization (lazy, idempotent)
@@ -118,24 +119,6 @@ async function getRunState(apiKey, runId) {
   if (!res.ok) return null;
   const { data } = await res.json();
   return data;
-}
-
-export async function findIssueRun(apiKey, { repo, issueNumber }) {
-  const runs = await findRuns(apiKey, LABELS.ISSUE);
-  const match = runs.find(r =>
-    r.opts?.repo === repo &&
-    r.opts?.issue === String(issueNumber)
-  );
-  if (!match) return null;
-
-  const data = await getRunState(apiKey, match.id);
-  if (!data) return null;
-
-  const outcomes = data.outcomes || [];
-  const lastOutcome = outcomes[outcomes.length - 1];
-  const blockedAt = lastOutcome?.name === OUTCOMES.MAX_RETRIES ? lastOutcome.timestamp : null;
-
-  return { runId: match.id, blockedAt, countSince: null };
 }
 
 export async function countRevisions(apiKey, { prNumber, repo, since }) {

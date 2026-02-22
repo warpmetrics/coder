@@ -2,12 +2,10 @@
 // Dispatches to all configured channels (GitHub comments, Slack, etc.).
 
 import { create as createGitHub } from './github.js';
-import { create as createSlack } from './slack.js';
 import { create as createTelegram } from './telegram.js';
 
 const providers = {
   github: createGitHub,
-  slack: createSlack,
   telegram: createTelegram,
 };
 
@@ -25,7 +23,7 @@ export function createNotifier(config) {
     if (!factory) {
       throw new Error(`Unknown notify provider: ${c.provider}. Available: ${Object.keys(providers).join(', ')}`);
     }
-    return factory({ ...c, botToken: c.botToken || config?.telegramBotToken, configDir: config?.configDir });
+    return factory({ ...c, token: c.token || config?.githubBotToken, botToken: c.botToken || config?.telegramBotToken, configDir: config?.configDir });
   });
 
   return {

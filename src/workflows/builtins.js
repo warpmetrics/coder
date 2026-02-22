@@ -1,8 +1,8 @@
 // Builtins factory — provides all defaults for selective override
 // in custom workflow definitions.
 
-import { GRAPH, STATES } from '../machine.js';
-import { OUTCOMES, ACTS } from '../names.js';
+import { GRAPH, STATES } from '../graph/machine.js';
+import { OUTCOMES, ACTS } from '../graph/names.js';
 import { createDefaultExecutors, createDefaultEffects, defaultExecutorDefs } from './default.js';
 
 export function createBuiltins() {

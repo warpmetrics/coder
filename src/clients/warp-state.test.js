@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { TERMINAL_OUTCOMES, generateId, findPendingAct, findLastExecutedAct } from '../src/clients/warp.js';
-import { OUTCOMES } from '../src/names.js';
+import { TERMINAL_OUTCOMES, generateId, findPendingAct, findLastExecutedAct } from './warp.js';
+import { OUTCOMES } from '../graph/names.js';
 
 // ---------------------------------------------------------------------------
 // TERMINAL_OUTCOMES

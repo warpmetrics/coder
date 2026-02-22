@@ -1,9 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createBoard } from '../src/clients/boards/index.js';
-import { createPRClient } from '../src/clients/prs/index.js';
-import { createIssueClient } from '../src/clients/issues/index.js';
-import { createNotifier } from '../src/clients/notify/index.js';
+import { createBoard } from './boards/index.js';
+import { createPRClient } from './prs/index.js';
+import { createIssueClient } from './issues/index.js';
+import { createNotifier } from './notify/index.js';
 
 // ---------------------------------------------------------------------------
 // createBoard

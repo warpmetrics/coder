@@ -1,12 +1,9 @@
 import { execSync } from 'child_process';
-
-const DEFAULT_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+import { TIMEOUTS } from '../defaults.js';
 
 export function runHook(name, config, context) {
   const cmd = config.hooks?.[name];
   if (!cmd) return { ran: false };
-
-  console.log(`  hook: ${name} → ${cmd}`);
 
   const env = { ...process.env };
   if (context.issueNumber) env.ISSUE_NUMBER = String(context.issueNumber);
@@ -14,7 +11,7 @@ export function runHook(name, config, context) {
   if (context.branch) env.BRANCH = context.branch;
   if (context.repo) env.REPO = context.repo;
 
-  const timeout = (config.hooks?.timeout || 300) * 1000;
+  const timeout = config.hooks?.timeout ? config.hooks.timeout * 1000 : TIMEOUTS.HOOK;
 
   try {
     const stdout = execSync(cmd, { cwd: context.workdir, env, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout });

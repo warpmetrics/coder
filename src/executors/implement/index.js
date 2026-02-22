@@ -3,17 +3,19 @@
 
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync } from 'fs';
 import { repoName, deriveRepoDirNames, CONFIG_DIR } from '../../config.js';
+import { TIMEOUTS } from '../../defaults.js';
 import { fetchComments } from '../../clients/claude-code.js';
 import * as warp from '../../clients/warp.js';
-import { OUTCOMES, ACTS } from '../../names.js';
+import { OUTCOMES, ACTS } from '../../graph/names.js';
 import { safeHook } from '../../agent/hooks.js';
 import { loadMemory } from '../../agent/memory.js';
-import { reflect } from '../../agent/reflect.js';
-import { classifyIntentPrompt, buildImplementPrompt } from './prompt.js';
+import { reflectOnStep } from '../../agent/reflect.js';
+import { classifyIntentPrompt, buildImplementPrompt, INTENT_SCHEMA, IntentSchema } from './prompt.js';
 import { inferDeployPlan } from '../deploy/release.js';
 import { installSkills } from '../../agent/skills.js';
+import { gitExclude } from '../../agent/workspace.js';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -21,10 +23,19 @@ import { installSkills } from '../../agent/skills.js';
 
 async function classifyIntent(claudeCode, message, log) {
   try {
-    const { result } = await claudeCode.run({ prompt: classifyIntentPrompt(message), maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: 60000, verbose: false });
-    const raw = result.trim();
-    const isPropose = raw.toUpperCase().includes('PROPOSE');
-    log(`  classifyIntent: "${raw}" → ${isPropose ? 'PROPOSE' : 'IMPLEMENT'}`);
+    const res = await claudeCode.run({ prompt: classifyIntentPrompt(message), jsonSchema: INTENT_SCHEMA, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
+    let intent = res.structuredOutput?.intent;
+    if (!intent) {
+      // Fallback: parse from text
+      const parsed = IntentSchema.safeParse(typeof res.result === 'string' ? (() => { try { return JSON.parse(res.result); } catch { return null; } })() : res.result);
+      if (parsed?.success) intent = parsed.data.intent;
+    }
+    if (!intent) {
+      // Last resort: text matching
+      intent = res.result?.trim().toUpperCase().includes('PROPOSE') ? 'PROPOSE' : 'IMPLEMENT';
+    }
+    const isPropose = intent === 'PROPOSE';
+    log(`  classifyIntent: ${intent} → ${isPropose ? 'PROPOSE' : 'IMPLEMENT'}`);
     return isPropose;
   } catch (err) {
     log(`  classifyIntent failed (defaulting to PROPOSE): ${err.message}`);
@@ -39,8 +50,10 @@ function setupWorkspace(git, repos, { workdir, branch, resume }) {
   if (resume && existsSync(workdir)) {
     for (let i = 0; i < repos.length; i++) {
       const dir = join(workdir, dirNames[i]);
-      if (i === 0 || existsSync(join(dir, '.git')))
+      if (i === 0 || existsSync(join(dir, '.git'))) {
+        git.setBotIdentity(dir);
         repoDirs.push({ url: repos[i].url, name: repoName(repos[i]), dirName: dirNames[i], dir });
+      }
     }
     return { repoDirs, dirNames, resumed: true };
   }
@@ -60,20 +73,6 @@ function discoverClonedRepos(repos, dirNames, workdir, repoDirs) {
     if (existsSync(join(dir, '.git')) && !repoDirs.some(r => r.dir === dir))
       repoDirs.push({ url: repos[i].url, name: repoName(repos[i]), dirName: dirNames[i], dir });
   }
-}
-
-function reflectOnStep(config, configDir, step, opts, log, claudeCode) {
-  if (config.memory?.enabled === false) return;
-  reflect({ configDir, step, ...opts, hookOutputs: (opts.hookOutputs || []).filter(h => h.ran), maxLines: config.memory?.maxLines || 100, claudeCode })
-    .then(() => log('  reflect: memory updated'))
-    .catch(() => {});
-}
-
-function gitExclude(dir, entries) {
-  const file = join(dir, '.git', 'info', 'exclude');
-  const existing = existsSync(file) ? readFileSync(file, 'utf-8') : '';
-  const additions = entries.filter(e => !existing.includes(e));
-  if (additions.length) writeFileSync(file, existing.trimEnd() + '\n' + additions.join('\n') + '\n');
 }
 
 function pushAndCreatePRs(git, prs, repoDirs, { branch, issueId, issueTitle, primaryRepoName, prActId, config, hookOutputs, log }) {
@@ -228,7 +227,7 @@ export async function implement(item, ctx) {
       prompt, workdir,
       resume: resumed ? resumeSession : undefined,
       disallowedTools: config.claude?.disallowedTools || ['Bash(gh *)'],
-      logPrefix: `[#${issueId}] `, onBeforeLog,
+      logPrefix: `[#${issueId}] [implement]`, onBeforeLog,
     });
     log(`  claude done (cost: $${result.costUsd ?? '?'})`);
 

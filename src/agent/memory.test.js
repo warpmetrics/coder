@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { loadMemory, saveMemory } from '../src/agent/memory.js';
+import { loadMemory, saveMemory } from './memory.js';
 
 describe('loadMemory', () => {
   it('returns empty string when file does not exist', () => {

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { repoName, deriveRepoDirNames } from '../src/config.js';
+import { repoName, deriveRepoDirNames } from './config.js';
 
 describe('repoName', () => {
   it('extracts owner/name from HTTPS URL', () => {

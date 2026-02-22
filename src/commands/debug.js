@@ -5,8 +5,21 @@
 import { createInterface } from 'readline';
 import { loadConfig, repoName } from '../config.js';
 import * as warp from '../clients/warp.js';
-import { GRAPH, ACT_EXECUTOR, RESULT_EDGES, RESULT_OUTCOMES, STATES } from '../machine.js';
-import { OUTCOMES, ACTS } from '../names.js';
+import { GRAPH, STATES } from '../graph/machine.js';
+import { normalizeOutcomes } from '../graph/index.js';
+
+// Derived from GRAPH at load time.
+const ACT_EXECUTOR = Object.fromEntries(
+  Object.entries(GRAPH).filter(([, n]) => n.executor !== null).map(([a, n]) => [a, n.executor])
+);
+const RESULT_EDGES = {};
+for (const node of Object.values(GRAPH)) {
+  if (node.executor === null) continue;
+  for (const [resultType, result] of Object.entries(node.results)) {
+    RESULT_EDGES[`${node.executor}:${resultType}`] = normalizeOutcomes(result.outcomes);
+  }
+}
+import { OUTCOMES, ACTS } from '../graph/names.js';
 
 const RESULT_CHOICES = {
   implement: [
@@ -45,10 +58,6 @@ const RESULT_CHOICES = {
     { key: 'e', type: 'error', label: 'error (release failed)' },
   ],
 };
-
-function normalizeOutcomes(outcomes) {
-  return Array.isArray(outcomes) ? outcomes : [outcomes];
-}
 
 function resolveContainer(inLabel, issueRunId, parentEntityId, parentEntityLabel) {
   if (!inLabel || inLabel === 'Issue') return issueRunId;

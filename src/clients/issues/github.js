@@ -28,5 +28,11 @@ export function create() {
       }
       gh(['issue', 'edit', String(issueId), '--repo', repo, ...labels.flatMap(l => ['--add-label', l])]);
     },
+
+    closeIssue(issueId, { repo, reason } = {}) {
+      const args = ['issue', 'close', String(issueId), '--repo', repo];
+      if (reason) args.push('--reason', reason);
+      gh(args);
+    },
   };
 }

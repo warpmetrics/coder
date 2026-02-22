@@ -56,6 +56,7 @@ export function loadConfig(cwd = process.cwd()) {
   if (env.WARP_CODER_CHANGELOG_TOKEN && raw.changelog) raw.changelog.token = env.WARP_CODER_CHANGELOG_TOKEN;
   if (env.WARP_CODER_TELEGRAM_BOT_TOKEN) raw.telegramBotToken = env.WARP_CODER_TELEGRAM_BOT_TOKEN;
   if (env.WARP_CODER_GITHUB_TOKEN) raw.githubToken = env.WARP_CODER_GITHUB_TOKEN;
+  if (env.WARP_CODER_GITHUB_BOT_TOKEN) raw.githubBotToken = env.WARP_CODER_GITHUB_BOT_TOKEN;
 
   // Warn if secrets are missing
   if (!raw.warpmetricsApiKey) {

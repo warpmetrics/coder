@@ -336,6 +336,64 @@ describe('deploy executor', () => {
     assert.notEqual(paths[0], paths[paths.length - 1], 'concurrent deploys should use different workdirs');
   });
 
+  it('completedRepos skips already-deployed repos on retry', async () => {
+    const logs = [];
+    const gitMock = makeGit();
+    const exec = makeExec();
+    const fs = makeFsMock();
+    const actOpts = makeActOpts({
+      release: [
+        { repo: 'org/warp', command: 'npm run release:patch', dependsOn: [] },
+        { repo: 'org/api', command: 'npm run deploy:prod', dependsOn: ['org/warp'] },
+      ],
+      completedRepos: ['org/warp'],
+    });
+
+    const result = await deploy(actOpts, {
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
+    });
+
+    assert.equal(result.type, 'success');
+    assert.equal(result.steps.length, 1, 'should only have api step');
+    assert.equal(result.steps[0].repo, 'org/api');
+    assert.equal(gitMock._cloneCalls.length, 1, 'should only clone api');
+    assert.ok(logs.some(l => l.includes('skipping already deployed')));
+  });
+
+  it('completedRepos works with batched issues', async () => {
+    const logs = [];
+    const gitMock = makeGit();
+    const exec = makeExec();
+    const fs = makeFsMock();
+
+    const batch = makeBatch([
+      {
+        issueId: 42, runId: 'r1',
+        release: [{ repo: 'org/api', command: 'npm run deploy:prod', dependsOn: [] }],
+      },
+      {
+        issueId: 99, runId: 'r2',
+        release: [
+          { repo: 'org/warp', command: 'npm run release:patch', dependsOn: [] },
+          { repo: 'org/api', command: 'npm run deploy:prod', dependsOn: ['org/warp'] },
+        ],
+      },
+    ]);
+
+    // warp already deployed in a previous attempt
+    const actOpts = { issueId: 42, completedRepos: ['org/warp'] };
+
+    const result = await deploy(actOpts, {
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: batch, exec, fs },
+    });
+
+    assert.equal(result.type, 'success');
+    assert.equal(result.steps.length, 1, 'should only deploy api');
+    assert.equal(result.steps[0].repo, 'org/api');
+  });
+
   it('step without script is skipped', async () => {
     const logs = [];
     const gitMock = makeGit();

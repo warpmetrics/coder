@@ -2,11 +2,13 @@
 
 import { execFileSync } from 'child_process';
 
-function gh(args, opts = {}) {
-  return execFileSync('gh', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], ...opts }).trim();
-}
+export function create({ token } = {}) {
+  const env = token ? { ...process.env, GH_TOKEN: token } : undefined;
 
-export function create() {
+  function gh(args, opts = {}) {
+    return execFileSync('gh', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], env, ...opts }).trim();
+  }
+
   return {
     comment(issueId, { body, repo }) {
       gh(['issue', 'comment', String(issueId), '--repo', repo, '--body-file', '-'], { input: body });

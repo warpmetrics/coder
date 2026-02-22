@@ -2,13 +2,14 @@
 // topo-sorts, and runs deploy scripts in dependency order.
 
 import { execSync as defaultExecSync } from 'child_process';
+import { TIMEOUTS } from '../../defaults.js';
 import crypto from 'crypto';
 import { existsSync as defaultExistsSync, rmSync as defaultRmSync, mkdirSync as defaultMkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { mergeDAGs, topoSort, buildSteps } from './plan.js';
 import { deriveRepoDirNames } from '../../config.js';
-import { OUTCOMES } from '../../names.js';
+import { OUTCOMES } from '../../graph/names.js';
 
 /**
  * Build plan inputs from actOpts and optional deployBatch.
@@ -76,11 +77,16 @@ export const definition = {
         groups: i.groups ? Object.fromEntries(i.groups) : {},
       }));
 
+      // Accumulate completedRepos across retries so batching can't re-introduce them.
+      const prevCompleted = context.actOpts?.completedRepos || [];
+      const newCompleted = result.completedRepos ? [...result.completedRepos] : [];
+      const allCompleted = [...new Set([...prevCompleted, ...newCompleted])];
+
       let prs = context.actOpts?.prs || [];
       let release = context.actOpts?.release || [];
-      if (result.type === 'error' && result.completedRepos?.size) {
-        release = release.filter(s => !result.completedRepos.has(s.repo));
-        prs = prs.filter(p => !result.completedRepos.has(p.repo));
+      if (result.type === 'error' && allCompleted.length) {
+        release = release.filter(s => !allCompleted.includes(s.repo));
+        prs = prs.filter(p => !allCompleted.includes(p.repo));
         clients.log(`retry will only deploy: ${release.map(s => s.repo).join(', ')}`);
       }
 
@@ -88,7 +94,7 @@ export const definition = {
         ...result,
         costUsd: null, trace: null,
         outcomeOpts: { stepCount: result.steps?.length },
-        nextActOpts: { prs, release, batchedIssues: serializedBatch },
+        nextActOpts: { prs, release, completedRepos: allCompleted, batchedIssues: serializedBatch },
         batchedIssues,
       };
     };
@@ -120,7 +126,7 @@ export async function deploy(actOpts, ctx = {}) {
     log(`[${short}] running: ${step.command}`);
     const start = Date.now();
     try {
-      execSync(step.command, { cwd: repoDir, stdio: 'pipe', timeout: 10 * 60 * 1000 });
+      execSync(step.command, { cwd: repoDir, stdio: 'pipe', timeout: TIMEOUTS.DEPLOY });
       log(`[${short}] done (${Math.round((Date.now() - start) / 1000)}s)`);
       return { ok: true };
     } catch (err) {
@@ -133,7 +139,12 @@ export async function deploy(actOpts, ctx = {}) {
   const merged = mergeDAGs(plans);
   const ordered = topoSort(merged.dag);
   if (!ordered) return { type: 'error', error: 'Circular dependency in deploy DAG' };
-  const steps = buildSteps(ordered, merged);
+  const allSteps = buildSteps(ordered, merged);
+
+  // Filter out repos that already deployed successfully in a previous attempt.
+  const previouslyCompleted = new Set(actOpts?.completedRepos || []);
+  const steps = allSteps.filter(s => !previouslyCompleted.has(s.repo));
+  if (previouslyCompleted.size) log(`skipping already deployed: ${[...previouslyCompleted].join(', ')}`);
 
   if (steps.length === 0) return { type: 'error', error: 'No deploy steps found' };
 

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { compileGraph, loadGraph } from './index.js';
-import { GRAPH as ORIGINAL_GRAPH, STATES as ORIGINAL_STATES } from '../machine.js';
+import { GRAPH as ORIGINAL_GRAPH, STATES as ORIGINAL_STATES } from './machine.js';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
 

@@ -33,6 +33,19 @@ if (command === 'watch') {
 } else if (command === 'debug') {
   const { debug } = await import('../src/commands/debug.js');
   await debug(process.argv.slice(3));
+} else if (command === 'verify') {
+  const { GRAPH, STATES } = await import('../src/graph/machine.js');
+  const { buildTransitionGraph, validateGraph, findReachableActs } = await import('../src/graph/index.js');
+  const { ACTS } = await import('../src/graph/names.js');
+  const { edges } = buildTransitionGraph(GRAPH);
+  const { ok, errors, warnings } = validateGraph(GRAPH, STATES);
+  const reachable = findReachableActs(ACTS.BUILD, GRAPH);
+  console.log(`Acts: ${Object.keys(GRAPH).length}  Edges: ${edges.length}  Reachable: ${reachable.size}`);
+  for (const err of errors) console.log(`  [FAIL] ${err}`);
+  for (const warn of warnings) console.log(`  [WARN] ${warn}`);
+  if (errors.length === 0) console.log('  OK');
+  for (const edge of edges) console.log(`  ${edge.from} ──${edge.via}──> ${edge.to}`);
+  process.exit(ok ? 0 : 1);
 } else if (command === 'compact') {
   const configDir = join(process.cwd(), CONFIG_DIR);
   const { loadConfig } = await import('../src/config.js');
@@ -50,6 +63,7 @@ if (command === 'watch') {
   console.log('    warp-coder release             Release shipped issues (packages + deploys)');
   console.log('    warp-coder release --preview   Preview changelog entries without releasing');
   console.log('    warp-coder debug [issue#] [--title "..."]  Interactive state machine testing');
+  console.log('    warp-coder verify    Verify state machine graph consistency');
   console.log('    warp-coder memory    Print current memory file');
   console.log('    warp-coder compact   Force-rewrite memory file');
   console.log('');

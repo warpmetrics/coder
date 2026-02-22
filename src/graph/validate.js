@@ -1,17 +1,8 @@
-// Derives the complete transition graph from GRAPH in machine.js.
-// Pure functions — no I/O, fully testable.
-// All functions accept optional graph/states params, defaulting to built-in.
+// Graph analysis and validation utilities.
+// Pure functions — no I/O, no default graph. Callers pass graph/states.
 
-import {
-  GRAPH as DEFAULT_GRAPH, STATES as DEFAULT_STATES,
-} from './machine.js';
-import { ACTS } from './names.js';
+import { normalizeOutcomes } from './index.js';
 
-function normalizeOutcomes(outcomes) {
-  return Array.isArray(outcomes) ? outcomes : [outcomes];
-}
-
-// Derive maps from a given graph (same logic as machine.js but local).
 function deriveMaps(graph) {
   const actExecutor = {};
   const resultEdges = {};
@@ -42,7 +33,7 @@ function deriveMaps(graph) {
  *   via: 'actName:resultType' for phase groups, 'executor:resultType' for work acts
  *   type: 'transition' | 'terminal' | 'auto'
  */
-export function buildTransitionGraph(graph = DEFAULT_GRAPH) {
+export function buildTransitionGraph(graph) {
   const edges = [];
 
   for (const [actName, node] of Object.entries(graph)) {
@@ -74,7 +65,7 @@ export function buildTransitionGraph(graph = DEFAULT_GRAPH) {
 /**
  * BFS from a start act to find all reachable acts.
  */
-export function findReachableActs(startAct = ACTS.BUILD, graph = DEFAULT_GRAPH) {
+export function findReachableActs(startAct, graph) {
   const { edges } = buildTransitionGraph(graph);
   const visited = new Set([startAct]);
   const queue = [startAct];
@@ -96,7 +87,7 @@ export function findReachableActs(startAct = ACTS.BUILD, graph = DEFAULT_GRAPH) 
  * Validate that the graph is internally consistent.
  * Returns { ok, errors, warnings }.
  */
-export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
+export function validateGraph(graph, states) {
   const errors = [];
   const warnings = [];
 
@@ -104,7 +95,6 @@ export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
 
   const graphLabels = new Set(Object.values(graph).map(n => n.label));
 
-  // Every graph node has label, executor (or null for phases), results.
   for (const [act, node] of Object.entries(graph)) {
     if (typeof node.label !== 'string' || !node.label) {
       errors.push(`GRAPH['${act}'] missing label`);
@@ -116,7 +106,6 @@ export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
       errors.push(`GRAPH['${act}'] missing results`);
     }
 
-    // Phase groups must have executor: null and a single 'created' result.
     if (node.executor === null) {
       const resultKeys = Object.keys(node.results);
       if (resultKeys.length !== 1 || resultKeys[0] !== 'created') {
@@ -125,7 +114,6 @@ export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
     }
   }
 
-  // Every result has outcomes with valid shape. Every 'in' is 'Issue' or matches a graph label.
   for (const [act, node] of Object.entries(graph)) {
     for (const [resultType, result] of Object.entries(node.results)) {
       if (!result.outcomes) {
@@ -150,7 +138,6 @@ export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
     }
   }
 
-  // Every act in actExecutor should have at least one resultEdges entry.
   for (const [actName, executorName] of Object.entries(actExecutor)) {
     const hasResult = Object.keys(resultEdges).some(k => k.startsWith(executorName + ':'));
     if (!hasResult) {
@@ -158,21 +145,18 @@ export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
     }
   }
 
-  // Every resultEdges entry should have a matching nextAct entry.
   for (const key of Object.keys(resultEdges)) {
     if (!(key in nextAct)) {
       errors.push(`RESULT_EDGES['${key}'] has no NEXT_ACT entry`);
     }
   }
 
-  // Every non-null nextAct value should be a valid act in graph.
   for (const [key, next] of Object.entries(nextAct)) {
     if (next !== null && !(next in graph)) {
       errors.push(`NEXT_ACT['${key}'] = '${next}' not in GRAPH`);
     }
   }
 
-  // Every outcome name in resultEdges should have a states entry.
   for (const [key, edges] of Object.entries(resultEdges)) {
     for (const edge of edges) {
       if (!(edge.name in states)) {
@@ -181,7 +165,6 @@ export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
     }
   }
 
-  // All acts reachable from first act in graph.
   const firstAct = Object.keys(graph)[0];
   if (firstAct) {
     const reachable = findReachableActs(firstAct, graph);
@@ -196,14 +179,12 @@ export function validateGraph(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
 }
 
 /**
- * Find outcomes in states that no resultEdges entry produces
- * and no phase group produces.
+ * Find outcomes in states that no result edge or phase group produces.
  * These are external-only outcomes (e.g. RESUMED, STARTED, ABORTED).
  */
-export function findOrphanOutcomes(graph = DEFAULT_GRAPH, states = DEFAULT_STATES) {
+export function findOrphanOutcomes(graph, states) {
   const produced = new Set();
 
-  // Work act outcomes.
   const { resultEdges } = deriveMaps(graph);
   for (const edges of Object.values(resultEdges)) {
     for (const edge of edges) {
@@ -211,7 +192,6 @@ export function findOrphanOutcomes(graph = DEFAULT_GRAPH, states = DEFAULT_STATE
     }
   }
 
-  // Phase group outcomes.
   for (const node of Object.values(graph)) {
     if (node.executor === null) {
       for (const result of Object.values(node.results)) {

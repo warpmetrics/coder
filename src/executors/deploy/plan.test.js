@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { topoSort, mergeDAGs, buildSteps, computeLevels, computeDeployBatch } from '../src/executors/deploy/plan.js';
-import { validateDeployPlan, extractJsonArray, buildDeployPlan } from '../src/executors/deploy/release.js';
+import { topoSort, mergeDAGs, buildSteps, computeLevels, computeDeployBatch } from './plan.js';
+import { validateDeployPlan, extractJsonArray, buildDeployPlan } from './release.js';
 
 // ---------------------------------------------------------------------------
 // topoSort

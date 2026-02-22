@@ -15,7 +15,7 @@ function run(args, opts = {}) {
  * Rewrite any GitHub URL to HTTPS with embedded token.
  * Handles: git@github.com:org/repo.git, https://github.com/org/repo.git
  */
-function tokenUrl(url, token) {
+export function tokenUrl(url, token) {
   if (!token) return url;
   const match = url.match(/github\.com[:/](.+?)(?:\.git)?$/);
   if (!match) return url;
@@ -24,12 +24,15 @@ function tokenUrl(url, token) {
 
 export function createGitClient({ token } = {}) {
 
+  function setBotIdentity(dir) {
+    if (!token) return;
+    run(['-C', dir, 'config', 'user.name', BOT_NAME]);
+    run(['-C', dir, 'config', 'user.email', BOT_EMAIL]);
+  }
+
   function clone(repoUrl, dest, { branch } = {}) {
     run(['clone', ...(branch ? ['--branch', branch] : []), tokenUrl(repoUrl, token), dest]);
-    if (token) {
-      run(['-C', dest, 'config', 'user.name', BOT_NAME]);
-      run(['-C', dest, 'config', 'user.email', BOT_EMAIL]);
-    }
+    setBotIdentity(dest);
   }
 
   function createBranch(dir, name) {
@@ -63,5 +66,5 @@ export function createGitClient({ token } = {}) {
     return run(['branch', '--show-current'], { cwd: dir });
   }
 
-  return { clone, createBranch, getHead, hasNewCommits, status, commitAll, push, getCurrentBranch };
+  return { clone, setBotIdentity, createBranch, getHead, hasNewCommits, status, commitAll, push, getCurrentBranch };
 }

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { GRAPH } from '../src/machine.js';
-import { defaultExecutorDefs, createDefaultExecutors } from '../src/workflows/default.js';
+import { GRAPH } from '../graph/machine.js';
+import { defaultExecutorDefs, createDefaultExecutors } from './default.js';
 
 // ---------------------------------------------------------------------------
 // Executor module contract tests
