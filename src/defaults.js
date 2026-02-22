@@ -13,7 +13,7 @@ export const LIMITS = {
   MAX_RETRIES: 3,                // runner.js, deploy/release.js — generic retry limit
   MAX_REVISIONS: 3,              // revise/index.js — max revision attempts per PR
   MAX_REVIEW_RETRIES: 3,         // review/index.js — max review retry attempts
-  MAX_INFER_TURNS: 5,            // deploy/release.js — max Claude turns for dependency inference
+  MAX_INFER_TURNS: 10,           // deploy/release.js — max Claude turns for dependency inference
   MAX_REVIEW_TURNS: 50,          // review/index.js — max Claude turns for review
   REVIEW_TEXT_TRUNCATE: 20_000,  // revise/index.js — truncate review text beyond this
   POLL_INTERVAL: 30,             // watch.js, runner.js — seconds between poll cycles

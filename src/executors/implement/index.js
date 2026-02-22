@@ -23,7 +23,7 @@ import { gitExclude } from '../../agent/workspace.js';
 
 async function classifyIntent(claudeCode, message, log) {
   try {
-    const res = await claudeCode.run({ prompt: classifyIntentPrompt(message), jsonSchema: INTENT_SCHEMA, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
+    const res = await claudeCode.run({ prompt: classifyIntentPrompt(message), jsonSchema: INTENT_SCHEMA, maxTurns: 10, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
     let intent = res.structuredOutput?.intent;
     if (!intent) {
       // Fallback: parse from text

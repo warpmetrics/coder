@@ -12,7 +12,7 @@ import { CHANGELOG_ENTRY_SCHEMA, ChangelogEntrySchema } from './prompt.js';
 
 export async function generateChangelogEntry(claudeCode, prompt) {
   try {
-    const res = await claudeCode.run({ prompt, jsonSchema: CHANGELOG_ENTRY_SCHEMA, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
+    const res = await claudeCode.run({ prompt, jsonSchema: CHANGELOG_ENTRY_SCHEMA, maxTurns: 10, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
 
     // Prefer structured output from the schema.
     let parsed = res.structuredOutput;
@@ -26,7 +26,7 @@ export async function generateChangelogEntry(claudeCode, prompt) {
     if (!parsed?.title || !parsed?.entry) return null;
     return { ...parsed, costUsd: res.costUsd };
   } catch (err) {
-    // Caller handles null return — swallow error silently
+    console.error(`[changelog] generateChangelogEntry error: ${err.message}`);
     return null;
   }
 }
