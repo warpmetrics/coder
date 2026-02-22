@@ -8,9 +8,9 @@ import { join } from 'path';
 // Entry generation (shared helper)
 // ---------------------------------------------------------------------------
 
-export async function generateChangelogEntry(claudeCode, prompt, { model = 'sonnet' } = {}) {
+export async function generateChangelogEntry(claudeCode, prompt) {
   try {
-    const { result, costUsd } = await claudeCode.oneShot(prompt, { model, timeout: 60000 });
+    const { result, costUsd } = await claudeCode.run({ prompt, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: 60000, verbose: false });
 
     const jsonMatch = result.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;

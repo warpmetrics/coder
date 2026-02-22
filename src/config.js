@@ -54,6 +54,8 @@ export function loadConfig(cwd = process.cwd()) {
   if (env.WARP_CODER_LINEAR_KEY && raw.board) raw.board.apiKey = env.WARP_CODER_LINEAR_KEY;
   if (env.WARP_CODER_REVIEW_TOKEN) raw.reviewToken = env.WARP_CODER_REVIEW_TOKEN;
   if (env.WARP_CODER_CHANGELOG_TOKEN && raw.changelog) raw.changelog.token = env.WARP_CODER_CHANGELOG_TOKEN;
+  if (env.WARP_CODER_TELEGRAM_BOT_TOKEN) raw.telegramBotToken = env.WARP_CODER_TELEGRAM_BOT_TOKEN;
+  if (env.WARP_CODER_GITHUB_TOKEN) raw.githubToken = env.WARP_CODER_GITHUB_TOKEN;
 
   // Warn if secrets are missing
   if (!raw.warpmetricsApiKey) {
@@ -79,6 +81,8 @@ export function loadConfig(cwd = process.cwd()) {
     const name = repoName(repo);
     if (repo.deploy) raw.deploy[name] = { command: repo.deploy };
   }
+
+  raw.configDir = join(cwd, CONFIG_DIR);
 
   return raw;
 }

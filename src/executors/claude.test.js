@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTrace, fetchComments } from './claude.js';
+import { buildTrace, fetchComments } from '../clients/claude-code.js';
 
 // ---------------------------------------------------------------------------
 // buildTrace

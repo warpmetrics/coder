@@ -8,12 +8,10 @@ export const definition = {
   effects: {
     async success(run, result, ctx) {
       const { config, clients: { notify } } = ctx;
-      try {
-        notify.comment(run.issueId, {
-          repo: config.repoNames[0], runId: run.id,
-          body: `Merged successfully. Move to **Deploy** to trigger deployment.`,
-        });
-      } catch {}
+      notify.comment(run.issueId, {
+        repo: config.repoNames[0], runId: run.id, title: run.title,
+        body: `Merged successfully. Move to **Deploy** to trigger deployment.`,
+      });
     },
   },
   create() {
@@ -37,7 +35,7 @@ export const definition = {
 };
 
 export async function merge(item, ctx) {
-  const { config, clients: { prs, notify }, context: { log } } = ctx;
+  const { config, clients: { prs, notify, log } } = ctx;
   const repoNames = config.repoNames;
   const prList = item._prs || [];
   const ch = prs;
@@ -65,7 +63,7 @@ export async function merge(item, ctx) {
           log(mergeError.message);
           break;
         }
-      } catch {}
+      } catch (err) { log(`  warning: pre-merge state check failed for ${repo}#${prNumber}: ${err.message}`); }
 
       runHook('onBeforeMerge', config, { prNumber, repo });
       ch.mergePR(prNumber, { repo });
@@ -78,7 +76,7 @@ export async function merge(item, ctx) {
           log(mergeError.message);
           break;
         }
-      } catch {}
+      } catch (err) { log(`  warning: post-merge state check failed for ${repo}#${prNumber}: ${err.message}`); }
 
       merged.push({ repo, prNumber });
       log(`merged PR #${prNumber} in ${repo}`);
@@ -128,7 +126,7 @@ export async function merge(item, ctx) {
           '<details><summary>Files</summary>', '', fileLines, '', '</details>',
         ].join('\n'));
       }
-      notify.comment(issueId, { repo: primaryRepoName, runId: item._runId, body: `Shipped\n\n${sections.join('\n\n')}` });
+      notify.comment(issueId, { repo: primaryRepoName, runId: item._runId, title: item.content?.title, body: `Shipped\n\n${sections.join('\n\n')}` });
       log(`posted summary on issue #${issueId}`);
     } catch (err) {
       log(`warning: failed to post issue summary: ${err.message}`);

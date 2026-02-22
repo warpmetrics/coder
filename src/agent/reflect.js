@@ -1,4 +1,4 @@
-import { run } from '../executors/claude.js';
+import { rawRun, buildTrace } from '../clients/claude-code.js';
 import { loadMemory, saveMemory } from './memory.js';
 import { buildReflectPrompt } from './prompt.js';
 
@@ -11,7 +11,7 @@ export function reflect(args) {
   return p;
 }
 
-async function _reflect({ configDir, step, issue, prNumber, success, error, hookOutputs, reviewComments, claudeOutput, maxLines = 100 }) {
+async function _reflect({ configDir, step, issue, prNumber, success, error, hookOutputs, reviewComments, claudeOutput, maxLines = 100, claudeCode }) {
   const currentMemory = loadMemory(configDir);
 
   const prompt = buildReflectPrompt({
@@ -19,16 +19,21 @@ async function _reflect({ configDir, step, issue, prNumber, success, error, hook
     success, error, hookOutputs, reviewComments, claudeOutput, maxLines,
   });
 
-  const result = await run({
-    prompt,
-    workdir: process.cwd(),
-    allowedTools: '',
-    maxTurns: 1,
-    timeout: 60000, // 1 minute for reflection
-    verbose: false,
-  });
+  let result;
+  if (claudeCode) {
+    result = await claudeCode.run({ prompt, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: 60000, verbose: false });
+  } else {
+    result = await rawRun({
+      prompt,
+      workdir: process.cwd(),
+      allowedTools: '',
+      maxTurns: 1,
+      noSessionPersistence: true,
+      timeout: 60000,
+      verbose: false,
+    });
+  }
 
   const content = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
   saveMemory(configDir, content.trim() + '\n');
 }
-

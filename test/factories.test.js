@@ -105,9 +105,14 @@ describe('createNotifier factory', () => {
 
   it('throws for unknown provider in channels', () => {
     assert.throws(
-      () => createNotifier({ notify: [{ provider: 'telegram' }] }),
-      { message: /Unknown notify provider: telegram/ },
+      () => createNotifier({ notify: [{ provider: 'foobar' }] }),
+      { message: /Unknown notify provider: foobar/ },
     );
+  });
+
+  it('creates telegram provider without error', () => {
+    const notifier = createNotifier({ notify: [{ provider: 'telegram', chatId: '-100123' }] });
+    assert.ok(typeof notifier.comment === 'function');
   });
 
   it('defaults to github when no notify config', () => {

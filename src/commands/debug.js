@@ -13,7 +13,6 @@ const RESULT_CHOICES = {
     { key: 's', type: 'success', label: 'success (PR created)' },
     { key: 'e', type: 'error', label: 'error (implementation failed)' },
     { key: 'a', type: 'ask_user', label: 'ask_user (needs clarification)' },
-    { key: 'm', type: 'max_turns', label: 'max_turns (hit turn limit)' },
   ],
   review: [
     { key: 'a', type: 'approved', label: 'approved' },
@@ -207,9 +206,6 @@ export async function debug(argv) {
       nextActOpts = { ...pendingAct.opts };
       if (choice.type === 'success' && executorName === 'implement') {
         nextActOpts = { prs: [{ repo: repoNames[0], prNumber: 1 }], issueId: issueNumber, repo: repoNames[0] };
-      }
-      if (choice.type === 'max_turns') {
-        nextActOpts = { ...pendingAct.opts, sessionId: 'debug-session', retryCount: ((pendingAct.opts?.retryCount || 0) + 1) };
       }
     }
 

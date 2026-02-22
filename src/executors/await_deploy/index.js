@@ -9,7 +9,7 @@ export const definition = {
 };
 
 export async function awaitDeploy(run, ctx) {
-  const { config, context: { actOpts, log } } = ctx;
+  const { config, clients: { log }, context: { actOpts } } = ctx;
   const deployColName = config.board?.columns?.deploy || 'Deploy';
   const currentCol = run.boardItem?.status || run.boardItem?._stateName;
   const fwd = { prs: actOpts?.prs, release: actOpts?.release };

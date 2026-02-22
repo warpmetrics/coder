@@ -61,8 +61,8 @@ describe('generateChangelogEntry', () => {
   function mockClaudeCode(result, costUsd = 0.01) {
     const calls = [];
     return {
-      oneShot: async (prompt, opts) => {
-        calls.push({ prompt, opts });
+      run: async (opts) => {
+        calls.push(opts);
         return { result, costUsd };
       },
       _calls: calls,
@@ -71,11 +71,11 @@ describe('generateChangelogEntry', () => {
 
   function mockClaudeCodeThrowing() {
     return {
-      oneShot: async () => { throw new Error('command not found'); },
+      run: async () => { throw new Error('command not found'); },
     };
   }
 
-  it('returns null when oneShot throws', async () => {
+  it('returns null when run throws', async () => {
     const cc = mockClaudeCodeThrowing();
     const result = await generateChangelogEntry(cc, 'test prompt');
     assert.equal(result, null);
@@ -103,19 +103,11 @@ describe('generateChangelogEntry', () => {
     assert.equal(result.costUsd, 0.05);
   });
 
-  it('passes model option to oneShot', async () => {
+  it('passes prompt to run', async () => {
     const cc = mockClaudeCode('{}');
-    await generateChangelogEntry(cc, 'my prompt', { model: 'opus' });
+    await generateChangelogEntry(cc, 'my prompt');
 
     assert.equal(cc._calls.length, 1);
     assert.equal(cc._calls[0].prompt, 'my prompt');
-    assert.equal(cc._calls[0].opts.model, 'opus');
-  });
-
-  it('uses default model when not specified', async () => {
-    const cc = mockClaudeCode('{}');
-    await generateChangelogEntry(cc, 'prompt');
-
-    assert.equal(cc._calls[0].opts.model, 'sonnet');
   });
 });

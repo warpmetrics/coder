@@ -65,8 +65,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
     });
 
     assert.equal(result.type, 'success');
@@ -96,8 +96,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
     });
 
     assert.equal(result.type, 'success');
@@ -133,8 +133,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
     });
 
     assert.equal(result.type, 'error');
@@ -157,8 +157,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
     });
 
     assert.equal(result.type, 'error');
@@ -185,8 +185,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
     });
 
     assert.equal(result.type, 'error');
@@ -201,8 +201,8 @@ describe('deploy executor', () => {
     const actOpts = makeActOpts({ release: [] });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec: makeExec(), fs: makeFsMock(), log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec: makeExec(), fs: makeFsMock() },
     });
 
     assert.equal(result.type, 'error');
@@ -220,8 +220,8 @@ describe('deploy executor', () => {
 
     // deployBatch with empty issues array
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: { issueIds: [], issues: [] }, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: { issueIds: [], issues: [] }, exec, fs },
     });
 
     // Should fall back to actOpts since batch is empty
@@ -241,8 +241,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec: makeExec(), fs: makeFsMock(), log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec: makeExec(), fs: makeFsMock() },
     });
 
     assert.equal(result.type, 'error');
@@ -270,8 +270,8 @@ describe('deploy executor', () => {
     ]);
 
     const result = await deploy({ issueId: 42 }, {
-      clients: { git: gitMock },
-      context: { deployBatch: batch, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: batch, exec, fs },
     });
 
     assert.equal(result.type, 'success');
@@ -300,8 +300,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
     });
 
     assert.equal(result.type, 'success');
@@ -322,8 +322,8 @@ describe('deploy executor', () => {
     });
 
     // Run twice and verify workdirs differ
-    const result1 = await deploy(actOpts, { clients: { git: gitMock }, context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) } });
-    const result2 = await deploy(actOpts, { clients: { git: gitMock }, context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) } });
+    const result1 = await deploy(actOpts, { clients: { git: gitMock, log: msg => logs.push(msg) }, context: { deployBatch: null, exec, fs } });
+    const result2 = await deploy(actOpts, { clients: { git: gitMock, log: msg => logs.push(msg) }, context: { deployBatch: null, exec, fs } });
 
     assert.equal(result1.type, 'success');
     assert.equal(result2.type, 'success');
@@ -346,8 +346,8 @@ describe('deploy executor', () => {
     });
 
     const result = await deploy(actOpts, {
-      clients: { git: gitMock },
-      context: { deployBatch: null, exec, fs, log: msg => logs.push(msg) },
+      clients: { git: gitMock, log: msg => logs.push(msg) },
+      context: { deployBatch: null, exec, fs },
     });
 
     assert.equal(result.type, 'success');

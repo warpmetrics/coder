@@ -32,7 +32,7 @@ export const definition = {
   resultTypes: ['success', 'error'],
   effects: {
     async success(run, result, ctx) {
-      const { config, clients: { warp, board }, context: { log } } = ctx;
+      const { config, clients: { warp, board, log } } = ctx;
       const apiKey = config.warpmetricsApiKey;
       const batched = result.batchedIssues || [];
       if (batched.length === 0) return;
@@ -81,7 +81,7 @@ export const definition = {
       if (result.type === 'error' && result.completedRepos?.size) {
         release = release.filter(s => !result.completedRepos.has(s.repo));
         prs = prs.filter(p => !result.completedRepos.has(p.repo));
-        context.log(`retry will only deploy: ${release.map(s => s.repo).join(', ')}`);
+        clients.log(`retry will only deploy: ${release.map(s => s.repo).join(', ')}`);
       }
 
       return {
@@ -98,7 +98,8 @@ export const definition = {
 export async function deploy(actOpts, ctx = {}) {
   const { clients, context } = ctx;
   const git = clients?.git;
-  const { deployBatch, log, exec: execSync = defaultExecSync, fs: _fs } = context || {};
+  const log = clients?.log;
+  const { deployBatch, exec: execSync = defaultExecSync, fs: _fs } = context || {};
   const existsSync = _fs?.existsSync ?? defaultExistsSync;
   const rmSync = _fs?.rmSync ?? defaultRmSync;
   const mkdirSync = _fs?.mkdirSync ?? defaultMkdirSync;

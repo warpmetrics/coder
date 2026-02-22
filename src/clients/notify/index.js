@@ -3,10 +3,12 @@
 
 import { create as createGitHub } from './github.js';
 import { create as createSlack } from './slack.js';
+import { create as createTelegram } from './telegram.js';
 
 const providers = {
   github: createGitHub,
   slack: createSlack,
+  telegram: createTelegram,
 };
 
 function formatBotComment(body, runId) {
@@ -23,14 +25,14 @@ export function createNotifier(config) {
     if (!factory) {
       throw new Error(`Unknown notify provider: ${c.provider}. Available: ${Object.keys(providers).join(', ')}`);
     }
-    return factory(c);
+    return factory({ ...c, botToken: c.botToken || config?.telegramBotToken, configDir: config?.configDir });
   });
 
   return {
-    comment(issueId, { body, runId, repo }) {
-      const formatted = formatBotComment(body, runId);
+    comment(issueId, opts) {
+      const formatted = formatBotComment(opts.body, opts.runId);
       for (const ch of channels) {
-        try { ch.comment(issueId, { body: formatted, repo }); } catch {}
+        ch.comment(issueId, { ...opts, body: formatted });
       }
     },
   };

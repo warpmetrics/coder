@@ -4,9 +4,10 @@
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { mkdirSync, existsSync } from 'fs';
-import { repoName, deriveRepoDirNames } from '../../config.js';
-import { fetchComments } from '../claude.js';
+import { repoName, deriveRepoDirNames, CONFIG_DIR } from '../../config.js';
+import { fetchComments } from '../../clients/claude-code.js';
 import { buildReviewPrompt, REVIEW_SCHEMA } from './prompt.js';
+import { installSkills } from '../../agent/skills.js';
 
 export const definition = {
   name: 'review',
@@ -42,7 +43,7 @@ export const definition = {
 };
 
 export async function review(item, ctx) {
-  const { config, clients: { git, prs, issues, claudeCode }, context: { log, onStep, onBeforeLog } } = ctx;
+  const { config, clients: { git, prs, issues, claudeCode, log }, context: { onStep, onBeforeLog } } = ctx;
   const repoNames = config.repoNames;
   const issueId = item._issueId;
   const issueTitle = item.content?.title || `Issue #${issueId}`;
@@ -93,57 +94,58 @@ export async function review(item, ctx) {
       return { type: 'error', error: 'Could not clone any PR branches', costUsd: null, trace: null };
     }
 
-    // 3. Gather context
-    onStep?.('gathering context');
-    const diffs = [];
-    for (const rd of repoDirs) {
-      try {
-        const diff = prs.getPRDiff(rd.prNumber, { repo: rd.name });
-        diffs.push({ repo: rd.name, prNumber: rd.prNumber, diff });
-      } catch (err) {
-        log(`  warning: could not get diff for ${rd.name}#${rd.prNumber}: ${err.message}`);
-      }
-    }
+    // 3. Skills + issue context
+    const configDir = join(process.cwd(), CONFIG_DIR);
+    const skillCount = installSkills(configDir, workdir);
+    if (skillCount) log(`  installed ${skillCount} skill(s)`);
 
     let issueBody = '';
     try {
       issueBody = issues.getIssueBody(issueId, { repo: primaryRepo });
-    } catch {}
+    } catch (err) { log(`  warning: getIssueBody failed: ${err.message}`); }
 
-    const { commentsText } = fetchComments(issues, issueId, primaryRepo);
+    const { commentsText } = fetchComments(issues, issueId, primaryRepo, log);
 
-    // 4. Build prompt
+    // 4. Review: let Claude explore the diff and produce a JSON verdict
+    onStep?.('reviewing');
     const prompt = buildReviewPrompt({
-      workdir, repoDirs, diffs, issueId, issueTitle, issueBody, commentsText,
+      workdir, repoDirs, issueId, issueTitle, issueBody, commentsText,
     });
 
-    // 5. Spawn Claude Code with JSON schema for structured output
-    onStep?.('reviewing');
-    const maxTurns = config.claude?.reviewMaxTurns || 10;
+    const maxTurns = config.claude?.reviewMaxTurns || 50;
     const result = await claudeCode.run({
       prompt, workdir, maxTurns,
-      jsonSchema: REVIEW_SCHEMA,
+      disallowedTools: ['Edit', 'Write', 'NotebookEdit', 'Bash(gh *)'],
       logPrefix: `[#${issueId} review] `, onBeforeLog,
     });
     log(`  claude done (cost: $${result.costUsd ?? '?'})`);
 
-    // 6. Parse structured output (falls back to text extraction if structured_output missing)
-    const reviewData = result.structuredOutput ?? extractReviewJson(result.result);
+    // 5. Parse JSON verdict from output
+    let reviewData = null;
+    try {
+      reviewData = JSON.parse(result.result);
+    } catch {
+      reviewData = extractReviewJson(result.result);
+    }
+
     if (!reviewData || !reviewData.verdict) {
-      const preview = (result.result || '').slice(-200);
-      log(`  error: could not extract review JSON from Claude output (tail: ${preview})`);
-      return { type: 'error', error: 'Could not extract review JSON from Claude response', costUsd: result.costUsd, trace: result.trace };
+      log('  warning: could not parse verdict JSON, using conservative fallback');
+      reviewData = {
+        verdict: 'request_changes',
+        summary: 'Could not produce structured verdict. Manual review recommended.',
+        comments: [],
+      };
     }
 
     const verdict = reviewData.verdict === 'request_changes' ? 'request_changes' : 'approve';
     const event = verdict === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES';
     const comments = (reviewData.comments || []).map(c => ({
       path: c.path,
-      line: c.line,
+      ...(c.line != null ? { line: c.line } : {}),
       body: c.body,
     })).filter(c => c.path && c.body);
 
-    // 7. Submit review on each PR
+    // 6. Submit review on each PR
     onStep?.('submitting review');
     let submitSucceeded = false;
     const submitErrors = [];
@@ -170,7 +172,7 @@ export async function review(item, ctx) {
       return { type: 'error', error: `Review submit failed: ${submitErrors.join('; ')}`, costUsd: result.costUsd, trace: result.trace };
     }
 
-    // 8. Return result
+    // 7. Return result
     const prNumber = repoDirs[0]?.prNumber;
     const commentCount = comments.length;
     const resultPrs = repoDirs.map(r => ({ repo: r.name, prNumber: r.prNumber }));

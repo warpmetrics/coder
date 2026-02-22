@@ -10,7 +10,7 @@ export const definition = {
   resultTypes: ['success', 'error'],
   effects: {
     async success(run, result, ctx) {
-      const { config, clients: { warp, board }, context: { log } } = ctx;
+      const { config, clients: { warp, board, log } } = ctx;
       const apiKey = config.warpmetricsApiKey;
       const batched = result.batchedIssues || [];
       if (batched.length === 0) return;
@@ -51,7 +51,7 @@ export const definition = {
 };
 
 export async function release(run, ctx) {
-  const { config, clients: { prs, claudeCode }, context: { actOpts, log } } = ctx;
+  const { config, clients: { prs, claudeCode, log }, context: { actOpts } } = ctx;
   const batchedIssues = actOpts?.batchedIssues || [];
 
   // Collect PRs from trigger issue + all batched issues
@@ -91,11 +91,9 @@ export async function release(run, ctx) {
   }).join('\n\n');
   const context = `Issues:\n${allIssueLines.join('\n')}\n\n---\n\nChanges:\n${technicalContext}`;
 
-  const modelOpts = config.quickModel ? { model: config.quickModel } : {};
-
   log('generating changelog entries...');
-  const publicResult = await generateChangelogEntry(claudeCode, `${PUBLIC_PROMPT}\n\n---\n\n${context}`, modelOpts);
-  const privateResult = await generateChangelogEntry(claudeCode, `${PRIVATE_PROMPT}\n\n---\n\n${context}`, modelOpts);
+  const publicResult = await generateChangelogEntry(claudeCode, `${PUBLIC_PROMPT}\n\n---\n\n${context}`);
+  const privateResult = await generateChangelogEntry(claudeCode, `${PRIVATE_PROMPT}\n\n---\n\n${context}`);
 
   const totalCost = (publicResult?.costUsd || 0) + (privateResult?.costUsd || 0);
 

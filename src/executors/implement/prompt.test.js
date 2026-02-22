@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   classifyIntentPrompt,
   buildImplementPrompt,
-  IMPLEMENT_RESUME,
 } from './prompt.js';
 
 // ---------------------------------------------------------------------------
@@ -112,18 +111,3 @@ describe('buildImplementPrompt', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// IMPLEMENT_RESUME
-// ---------------------------------------------------------------------------
-
-describe('IMPLEMENT_RESUME', () => {
-
-  it('is a non-empty string', () => {
-    assert.ok(typeof IMPLEMENT_RESUME === 'string');
-    assert.ok(IMPLEMENT_RESUME.length > 0);
-  });
-
-  it('mentions continuation', () => {
-    assert.ok(IMPLEMENT_RESUME.includes('Continue'));
-  });
-});

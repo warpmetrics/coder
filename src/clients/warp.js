@@ -173,8 +173,8 @@ export async function findShippedIssues(apiKey) {
     if (outcomes.length === 0) continue;
 
     const lastOutcome = outcomes[outcomes.length - 1];
-    if (lastOutcome.name === OUTCOMES.SHIPPED || lastOutcome.name === OUTCOMES.RELEASE_FAILED) {
-      const shippedOutcome = [...outcomes].reverse().find(o => o.name === OUTCOMES.SHIPPED);
+    if (lastOutcome.name === OUTCOMES.MANUAL_RELEASE || lastOutcome.name === OUTCOMES.RELEASE_FAILED) {
+      const shippedOutcome = [...outcomes].reverse().find(o => o.name === OUTCOMES.MANUAL_RELEASE);
       if (!shippedOutcome) continue;
 
       const releaseAct = actsByOutcomeId.get(shippedOutcome.id);
@@ -247,12 +247,12 @@ export async function recordOutcome(apiKey, { runId }, { step, success, costUsd,
   ensureSDK(apiKey);
   const names = {
     implement: { true: OUTCOMES.PR_CREATED, false: OUTCOMES.IMPLEMENTATION_FAILED },
-    review: { true: OUTCOMES.APPROVED, false: OUTCOMES.FAILED },
+    review: { true: OUTCOMES.APPROVED, false: OUTCOMES.REVIEW_FAILED },
     revise: { true: OUTCOMES.FIXES_APPLIED, false: OUTCOMES.REVISION_FAILED },
     merge: { true: OUTCOMES.MERGED, false: OUTCOMES.MERGE_FAILED },
     await_deploy: { true: OUTCOMES.DEPLOY_APPROVED, false: OUTCOMES.DEPLOY_FAILED },
     deploy: { true: OUTCOMES.DEPLOYED, false: OUTCOMES.DEPLOY_FAILED },
-    await_reply: { true: OUTCOMES.CLARIFIED, false: OUTCOMES.FAILED },
+    await_reply: { true: OUTCOMES.CLARIFIED, false: OUTCOMES.REVIEW_FAILED },
     release: { true: OUTCOMES.RELEASED, false: OUTCOMES.RELEASE_FAILED },
   };
 
@@ -277,7 +277,7 @@ export async function recordOutcome(apiKey, { runId }, { step, success, costUsd,
   return { id: outcomeId, name };
 }
 
-export async function traceClaudeCall(apiKey, entityId, { duration, startedAt, endedAt, cost, status, turns, sessionId }) {
+export async function traceClaudeCall(apiKey, entityId, { duration, startedAt, endedAt, cost, status, messages, response, turns, sessionId }) {
   ensureSDK(apiKey);
   sdkTrace(entityId, {
     provider: 'anthropic',
@@ -287,6 +287,8 @@ export async function traceClaudeCall(apiKey, entityId, { duration, startedAt, e
     endedAt,
     cost,
     status,
+    messages,
+    response,
     opts: { turns, session_id: sessionId },
   });
   await sdkFlush();
@@ -313,15 +315,29 @@ export async function closeIssueRun(apiKey, { runId, name, opts }) {
 // ---------------------------------------------------------------------------
 
 export const TERMINAL_OUTCOMES = new Set([
-  OUTCOMES.SHIPPED,
+  OUTCOMES.MANUAL_RELEASE,
   OUTCOMES.RELEASED,
-  OUTCOMES.IMPLEMENTATION_FAILED,
-  OUTCOMES.REVISION_FAILED,
-  OUTCOMES.MAX_RETRIES,
-  OUTCOMES.MERGE_FAILED,
-  OUTCOMES.FAILED,
   OUTCOMES.ABORTED,
 ]);
+
+/**
+ * Find the last act that was actually executed (has followUpRuns).
+ * Walks groups newest-first, outcomes newest-first.
+ * Returns { act, parentId, parentLabel } or null.
+ */
+export function findLastExecutedAct(data) {
+  for (const group of (data.groups || []).slice().reverse()) {
+    for (let i = (group.outcomes || []).length - 1; i >= 0; i--) {
+      const oc = group.outcomes[i];
+      for (const act of (oc.acts || []).slice().reverse()) {
+        if (act.followUpRuns?.length > 0) {
+          return { act, parentId: group.id, parentLabel: group.label };
+        }
+      }
+    }
+  }
+  return null;
+}
 
 /**
  * Find a pending act on a run or its groups (phase groups).
@@ -398,6 +414,15 @@ export async function findOpenIssueRuns(apiKey) {
       if (g.label && g.id) groups.set(g.label, g.id);
     }
 
+    // When no pending act, find the last executed act for retry-from-blocked.
+    let lastExecutedAct = null;
+    if (!pendingAct) {
+      const last = findLastExecutedAct(data);
+      if (last) {
+        lastExecutedAct = { name: last.act.name, opts: last.act.opts || {}, parentId: last.parentId, parentLabel: last.parentLabel };
+      }
+    }
+
     open.push({
       id: run.id,
       issueId: run.opts?.issue ? Number(run.opts.issue) : null,
@@ -410,6 +435,7 @@ export async function findOpenIssueRuns(apiKey) {
       parentEntityId,
       parentEntityLabel,
       groups,
+      lastExecutedAct,
     });
   }
 

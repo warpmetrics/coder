@@ -24,10 +24,6 @@ Implement:
       outcome: Needs Clarification
       on: Build
       next: Await Reply
-    max_turns:
-      outcome: Paused
-      on: Build
-      next: Implement
 
 Await Reply:
   executor: await_reply
@@ -65,11 +61,11 @@ Evaluate:
       on: Review
       next: Revise
     error:
-      outcome: Failed
+      outcome: Review Failed
       on: Review
       next: Evaluate
     max_retries:
-      outcome: Failed
+      outcome: Review Failed
       on: Review
 
 Revise:
@@ -167,7 +163,7 @@ Publish:
 states:
   Started: todo
   Resumed: inProgress
-  Shipped: done
+  Manual Release: done
   Aborted: blocked
   Building: inProgress
   Reviewing: inReview
@@ -178,7 +174,6 @@ states:
   Approved: inReview
   Needs Clarification: waiting
   Clarified: inProgress
-  Paused: blocked
   Waiting: waiting
   Merged: readyForDeploy
   Awaiting Deploy: readyForDeploy
@@ -191,4 +186,4 @@ states:
   Revision Failed: blocked
   Max Retries: blocked
   Merge Failed: blocked
-  Failed: blocked
+  Review Failed: blocked

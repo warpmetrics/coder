@@ -87,7 +87,7 @@ export function buildDeployPlan(prs, deployConfig, dependencies) {
  * @param {{ model?: string, log?: function }} opts
  * @returns {Array<{repo: string, dependsOn: string[]}>} or null
  */
-export async function inferDependencies(claudeCode, sessionId, repos, workdir, { model = 'sonnet', log } = {}) {
+export async function inferDependencies(claudeCode, sessionId, repos, workdir, { log } = {}) {
   if (!sessionId || repos.length < 2) return null;
 
   const repoList = repos.map(r => `"${r}"`).join(', ');
@@ -105,7 +105,7 @@ Respond with ONLY the raw JSON array, no markdown fences, no explanation:
     try {
       result = await claudeCode.run({
         prompt, workdir, resume: sessionId,
-        maxTurns: 5, model, verbose: false,
+        maxTurns: 5, verbose: false,
       });
     } catch (err) {
       log?.(`  dependency inference attempt ${attempt + 1}: claude call failed: ${err.message}`);
@@ -146,7 +146,7 @@ Respond with ONLY the raw JSON array, no markdown fences, no explanation:
  * @param {{ model?: string, log?: function }} opts
  * @returns {{ release: Array<{repo, command, dependsOn}> }} or null
  */
-export async function inferDeployPlan(claudeCode, sessionId, prs, deployConfig, workdir, { model = 'sonnet', log } = {}) {
+export async function inferDeployPlan(claudeCode, sessionId, prs, deployConfig, workdir, { log } = {}) {
   if (!prs?.length) {
     log?.('  deploy plan: no PRs');
     return null;
@@ -171,7 +171,7 @@ export async function inferDeployPlan(claudeCode, sessionId, prs, deployConfig, 
   // Multi-repo — infer dependencies via LLM.
   let dependencies = null;
   try {
-    dependencies = await inferDependencies(claudeCode, sessionId, repos, workdir, { model, log });
+    dependencies = await inferDependencies(claudeCode, sessionId, repos, workdir, { log });
   } catch (err) {
     log?.(`  deploy plan: dependency inference failed: ${err.message}`);
   }

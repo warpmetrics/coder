@@ -11,14 +11,15 @@ import { safeHook } from '../../agent/hooks.js';
 import { loadMemory } from '../../agent/memory.js';
 import { reflect } from '../../agent/reflect.js';
 import { buildRevisePrompt } from './prompt.js';
+import { installSkills } from '../../agent/skills.js';
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
-function reflectOnStep(config, configDir, step, opts, log) {
+function reflectOnStep(config, configDir, step, opts, log, claudeCode) {
   if (config.memory?.enabled === false) return;
-  reflect({ configDir, step, ...opts, hookOutputs: (opts.hookOutputs || []).filter(h => h.ran), maxLines: config.memory?.maxLines || 100 })
+  reflect({ configDir, step, ...opts, hookOutputs: (opts.hookOutputs || []).filter(h => h.ran), maxLines: config.memory?.maxLines || 100, claudeCode })
     .then(() => log('  reflect: memory updated'))
     .catch(() => {});
 }
@@ -47,8 +48,8 @@ function pushRevisionChanges(git, repoDirs, headsBefore, log) {
 function fetchReviews(prsClient, prList, log) {
   const reviews = [], inline = [];
   for (const { repo, prNumber } of prList) {
-    try { reviews.push(...prsClient.getReviews(prNumber, { repo }).map(r => ({ ...r, _repo: repo, _prNumber: prNumber }))); } catch {}
-    try { inline.push(...prsClient.getReviewComments(prNumber, { repo }).map(c => ({ ...c, _repo: repo, _prNumber: prNumber }))); } catch {}
+    try { reviews.push(...prsClient.getReviews(prNumber, { repo }).map(r => ({ ...r, _repo: repo, _prNumber: prNumber }))); } catch (err) { log(`  warning: getReviews failed for ${repo}#${prNumber}: ${err.message}`); }
+    try { inline.push(...prsClient.getReviewComments(prNumber, { repo }).map(c => ({ ...c, _repo: repo, _prNumber: prNumber }))); } catch (err) { log(`  warning: getReviewComments failed for ${repo}#${prNumber}: ${err.message}`); }
   }
 
   const multi = prList.length > 1;
@@ -75,7 +76,7 @@ function updatePRActIds(prsClient, repoDirs, prActId, log) {
       body = body.replace(/<!-- wm:act:wm_act_\w+ -->/, `<!-- wm:act:${prActId} -->`);
       if (!body.includes(`<!-- wm:act:${prActId} -->`)) body += `\n\n<!-- wm:act:${prActId} -->`;
       prsClient.updatePRBody(rd.prNumber, { repo: rd.name, body });
-    } catch {}
+    } catch (err) { log(`  warning: updatePRBody failed for ${rd.name}#${rd.prNumber}: ${err.message}`); }
   }
 }
 
@@ -84,7 +85,7 @@ function dismissStaleReviews(prsClient, prList, log) {
     try {
       for (const r of prsClient.getReviews(prNumber, { repo }))
         if (r.state === 'CHANGES_REQUESTED') { prsClient.dismissReview(prNumber, r.id, { repo, message: 'Code verified — no changes needed.' }); log(`  dismissed review ${r.id}`); }
-    } catch {}
+    } catch (err) { log(`  warning: dismissStaleReviews failed for ${repo}#${prNumber}: ${err.message}`); }
   }
 }
 
@@ -99,21 +100,17 @@ export const definition = {
     async error(run, result, ctx) {
       const { config, clients: { notify } } = ctx;
       const error = result.error || 'Unknown error';
-      try {
-        notify.comment(run.issueId, {
-          repo: config.repoNames[0], runId: run.id,
-          body: `<!-- warp-coder:error\n${error}\n-->\n\nRevision failed — needs human intervention.\n\n<details>\n<summary>Error details</summary>\n\n\`\`\`\n${error}\n\`\`\`\n</details>`,
-        });
-      } catch {}
+      notify.comment(run.issueId, {
+        repo: config.repoNames[0], runId: run.id, title: run.title,
+        body: `<!-- warp-coder:error\n${error}\n-->\n\nRevision failed — needs human intervention.\n\n<details>\n<summary>Error details</summary>\n\n\`\`\`\n${error}\n\`\`\`\n</details>`,
+      });
     },
     async max_retries(run, result, ctx) {
       const { config, clients: { notify } } = ctx;
-      try {
-        notify.comment(run.issueId, {
-          repo: config.repoNames[0], runId: run.id,
-          body: `<!-- warp-coder:error\nMax retries (${result.count})\n-->\n\nHit revision limit (${result.count} attempts) — needs human help.`,
-        });
-      } catch {}
+      notify.comment(run.issueId, {
+        repo: config.repoNames[0], runId: run.id, title: run.title,
+        body: `<!-- warp-coder:error\nMax retries (${result.count})\n-->\n\nHit revision limit (${result.count} attempts) — needs human help.`,
+      });
     },
   },
   create() {
@@ -135,7 +132,7 @@ export const definition = {
 };
 
 export async function revise(item, ctx) {
-  const { config, clients: { git, prs, claudeCode }, context: { log, onStep, onBeforeLog }, resumeSession } = ctx;
+  const { config, clients: { git, prs, claudeCode, log }, context: { onStep, onBeforeLog }, resumeSession } = ctx;
   const issueId = item._issueId;
   const prList = item._prs || [];
   const primaryRepo = prList[0]?.repo || repoName(config.repos[0]);
@@ -153,7 +150,7 @@ export async function revise(item, ctx) {
       if (count >= (config.maxRevisions || 3))
         return { type: 'max_retries', count, costUsd: null, trace: null };
       log(`  revision ${count + 1}/${config.maxRevisions || 3}`);
-    } catch {}
+    } catch (err) { log(`  warning: revision count check failed: ${err.message}`); }
   }
 
   try {
@@ -188,7 +185,9 @@ export async function revise(item, ctx) {
       }
     }
 
-    // 2. Reviews + prompt
+    // 2. Skills + reviews + prompt
+    const skillCount = installSkills(configDir, workdir);
+    if (skillCount) log(`  installed ${skillCount} skill(s)`);
     const { reviewSection, reviewComments } = fetchReviews(prs, prList, log);
     const memory = config.memory?.enabled !== false ? loadMemory(configDir) : '';
     const prompt = buildRevisePrompt({ repoDirs, contextRepos, memory, reviewSection });
@@ -218,10 +217,10 @@ export async function revise(item, ctx) {
       }
     }
 
-    reflectOnStep(config, configDir, 'revise', { prNumber: primaryPRNumber, success: true, hookOutputs, reviewComments, claudeOutput: result.result }, log);
+    reflectOnStep(config, configDir, 'revise', { prNumber: primaryPRNumber, success: true, hookOutputs, reviewComments, claudeOutput: result.result }, log, claudeCode);
     return { type: 'success', costUsd: result.costUsd, trace: result.trace };
   } catch (err) {
-    reflectOnStep(config, configDir, 'revise', { prNumber: primaryPRNumber, success: false, error: err.message, hookOutputs }, log);
+    reflectOnStep(config, configDir, 'revise', { prNumber: primaryPRNumber, success: false, error: err.message, hookOutputs }, log, claudeCode);
     return { type: 'error', error: err.message, costUsd: null, trace: null };
   }
 }

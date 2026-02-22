@@ -7,7 +7,7 @@ import { createBoard } from '../clients/boards/index.js';
 import { createPRClient } from '../clients/prs/index.js';
 import { createIssueClient } from '../clients/issues/index.js';
 import { createNotifier } from '../clients/notify/index.js';
-import * as git from '../clients/git.js';
+import { createGitClient } from '../clients/git.js';
 import { computeDeployBatch } from '../executors/deploy/plan.js';
 import { createBuiltins } from '../workflows/builtins.js';
 import { validateGraph } from '../machine-graph.js';
@@ -15,6 +15,7 @@ import * as warp from '../clients/warp.js';
 import { createClaudeCodeClient } from '../clients/claude-code.js';
 import { ACTS } from '../names.js';
 import { createRunner } from '../runner.js';
+import { listSkills } from '../agent/skills.js';
 
 // --- Spinner (status line) ---
 const SPINNER = ['\u28CB', '\u28D9', '\u28F9', '\u28F8', '\u28FC', '\u28F4', '\u28E6', '\u28E7', '\u28C7', '\u28CF'];
@@ -72,6 +73,12 @@ function createBoardAdapter(board, repoNames) {
     async scanDone() {
       try {
         const items = board.listDone ? await board.listDone() : [];
+        return new Set(items.filter(i => i._issueId).map(i => i._issueId));
+      } catch { return new Set(); }
+    },
+    async scanBlocked() {
+      try {
+        const items = board.listBlocked ? await board.listBlocked() : [];
         return new Set(items.filter(i => i._issueId).map(i => i._issueId));
       } catch { return new Set(); }
     },
@@ -168,6 +175,7 @@ export async function watch() {
   const prs = createPRClient(config);
   const issues = createIssueClient(config);
   const notify = createNotifier(config);
+  const git = createGitClient({ token: config.githubToken });
   const repoNames = config.repos.map(r => repoName(r));
   const pollInterval = (config.pollInterval || 30) * 1000;
   const apiKey = config.warpmetricsApiKey;
@@ -231,6 +239,8 @@ export async function watch() {
   console.log(`  workflow: ${workflowLabel}`);
   console.log(`  concurrency: ${config.concurrency || 1}`);
   console.log(`  poll interval: ${config.pollInterval || 30}s`);
+  const skills = listSkills(join(process.cwd(), CONFIG_DIR));
+  if (skills.length) console.log(`  skills: ${skills.join(', ')}`);
 
   while (running) {
     try {

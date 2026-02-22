@@ -41,8 +41,7 @@ function makeContext(overrides = {}) {
   const notify = overrides.notify || makeNotifier(overrides.notifyOverrides);
   return {
     config: overrides.config || { repoNames: ['owner/repo'] },
-    clients: { prs, notify },
-    context: { log: msg => logs.push(msg) },
+    clients: { prs, notify, log: msg => logs.push(msg) },
     _logs: logs,
   };
 }

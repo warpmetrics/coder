@@ -155,13 +155,6 @@ describe('RESULT_EDGES', () => {
     assert.equal(edges[1].next, ACTS.REVIEW);
   });
 
-  it('implement:max_turns has 1 outcome on Build with next', () => {
-    const edges = RESULT_EDGES['implement:max_turns'];
-    assert.equal(edges.length, 1);
-    assert.equal(edges[0].in, 'Build');
-    assert.equal(edges[0].next, ACTS.IMPLEMENT);
-  });
-
   it('implement:error has 1 outcome with no next (terminal)', () => {
     const edges = RESULT_EDGES['implement:error'];
     assert.equal(edges.length, 1);
@@ -197,11 +190,10 @@ describe('RESULT_OUTCOMES', () => {
     ['implement:success', OUTCOMES.PR_CREATED],
     ['implement:error', OUTCOMES.IMPLEMENTATION_FAILED],
     ['implement:ask_user', OUTCOMES.NEEDS_CLARIFICATION],
-    ['implement:max_turns', OUTCOMES.PAUSED],
     ['review:approved', OUTCOMES.APPROVED],
     ['review:changes_requested', OUTCOMES.CHANGES_REQUESTED],
-    ['review:error', OUTCOMES.FAILED],
-    ['review:max_retries', OUTCOMES.FAILED],
+    ['review:error', OUTCOMES.REVIEW_FAILED],
+    ['review:max_retries', OUTCOMES.REVIEW_FAILED],
     ['revise:success', OUTCOMES.FIXES_APPLIED],
     ['revise:error', OUTCOMES.REVISION_FAILED],
     ['revise:max_retries', OUTCOMES.MAX_RETRIES],
@@ -229,7 +221,6 @@ describe('NEXT_ACT', () => {
     ['implement:success', ACTS.REVIEW],
     ['implement:error', null],
     ['implement:ask_user', ACTS.AWAIT_REPLY],
-    ['implement:max_turns', ACTS.IMPLEMENT],
     ['review:approved', ACTS.MERGE],
     ['review:changes_requested', ACTS.REVISE],
     ['review:error', ACTS.EVALUATE],
@@ -299,7 +290,6 @@ describe('STATES', () => {
     [OUTCOMES.APPROVED, 'inReview'],
     [OUTCOMES.NEEDS_CLARIFICATION, 'waiting'],
     [OUTCOMES.CLARIFIED, 'inProgress'],
-    [OUTCOMES.PAUSED, 'blocked'],
     [OUTCOMES.WAITING, 'waiting'],
     [OUTCOMES.MERGED, 'readyForDeploy'],
     [OUTCOMES.AWAITING_DEPLOY, 'readyForDeploy'],
@@ -312,9 +302,9 @@ describe('STATES', () => {
     [OUTCOMES.REVISION_FAILED, 'blocked'],
     [OUTCOMES.MAX_RETRIES, 'blocked'],
     [OUTCOMES.MERGE_FAILED, 'blocked'],
-    [OUTCOMES.FAILED, 'blocked'],
+    [OUTCOMES.REVIEW_FAILED, 'blocked'],
     [OUTCOMES.RESUMED, 'inProgress'],
-    [OUTCOMES.SHIPPED, 'done'],
+    [OUTCOMES.MANUAL_RELEASE, 'done'],
     [OUTCOMES.ABORTED, 'blocked'],
     [OUTCOMES.BUILDING, 'inProgress'],
     [OUTCOMES.REVIEWING, 'inReview'],

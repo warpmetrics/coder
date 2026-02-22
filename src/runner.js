@@ -37,6 +37,36 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
     Object.entries(graph).filter(([, n]) => n.executor !== null).map(([a, n]) => [a, n.executor])
   );
 
+  // Derive outcome → retry target for terminal results (none of the edges have `next`).
+  // Maps outcome name → { actName, groupLabel, boardState } for retry-from-blocked.
+  const retryTargets = {};
+  for (const [actName, node] of Object.entries(graph)) {
+    if (node.executor === null) continue;
+    const groupLabel = node.group ? (graph[node.group]?.label || node.group) : null;
+
+    // Look up the phase group's "created" outcome to determine the correct board state.
+    let boardState = states[OUTCOMES.RESUMED]; // fallback: inProgress
+    if (node.group) {
+      const groupNode = graph[node.group];
+      if (groupNode?.results?.created) {
+        const createdEdges = normalizeOutcomes(groupNode.results.created.outcomes);
+        const createdOutcome = createdEdges[createdEdges.length - 1]?.name;
+        if (createdOutcome && states[createdOutcome]) boardState = states[createdOutcome];
+      }
+    }
+
+    for (const resultDef of Object.values(node.results)) {
+      const edges = normalizeOutcomes(resultDef.outcomes);
+      const hasNext = edges.some(e => e.next);
+      if (hasNext) continue;
+      // All edges for this result are terminal — use the last edge's outcome name.
+      const outcomeName = edges[edges.length - 1].name;
+      if (outcomeName) {
+        retryTargets[outcomeName] = { actName, groupLabel, boardState };
+      }
+    }
+  }
+
   // Derive allowed result types per executor from graph (for runtime enforcement).
   const executorResultTypes = new Map();
   for (const node of Object.values(graph)) {
@@ -76,14 +106,22 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
 
   async function finishPipeline(pipelineRunId, executorName, run, result) {
     if (!apiKey || !pipelineRunId) return;
-    try {
-      await warp.recordOutcome(apiKey, { runId: pipelineRunId }, {
-        step: executorName, success: result.type !== 'error',
-        costUsd: result.costUsd, error: result.type === 'error' ? result.error : undefined,
-        ...result.outcomeOpts,
-      });
-    } catch (err) {
-      log(run.issueId, `warning: outcome recording failed: ${err.message}`);
+    const opts = {
+      step: executorName, success: result.type !== 'error',
+      costUsd: result.costUsd, error: result.type === 'error' ? result.error : undefined,
+      ...result.outcomeOpts,
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await warp.recordOutcome(apiKey, { runId: pipelineRunId }, opts);
+        return;
+      } catch (err) {
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 5000 * (attempt + 1)));
+        } else {
+          log(run.issueId, `warning: outcome recording failed: ${err.message}`);
+        }
+      }
     }
   }
 
@@ -136,8 +174,8 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
           try {
             await effects[beforeKey](run, {
               config,
-              clients: { git, prs, issues, notify, warp, board },
-              context: { actOpts: act.opts, log: (msg) => log(run.issueId, msg), ...extraContext },
+              clients: { git, prs, issues, notify, warp, board, log: (msg) => log(run.issueId, `[${executorName}] ${msg}`) },
+              context: { actOpts: act.opts, ...extraContext },
             });
           } catch (err) {
             log(run.issueId, `warning: before effect failed: ${err.message}`);
@@ -148,10 +186,11 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
         let pipelineRunId = canWait ? null : await startPipeline(executorName, run, act);
 
         // Execute.
+        const executorLog = (msg) => log(run.issueId, `[${executorName}] ${msg}`);
         result = await execute[executorName](run, {
           config,
-          clients: { git, prs, issues, notify, claudeCode: claudeCode?.forRun(pipelineRunId), warp },
-          context: { pipelineRunId, actOpts: act.opts, log: (msg) => log(run.issueId, msg), onStep: (step) => onStep?.(run.issueId, step), onBeforeLog, ...extraContext },
+          clients: { git, prs, issues, notify, claudeCode: claudeCode?.forRun(pipelineRunId), warp, log: executorLog },
+          context: { pipelineRunId, actOpts: act.opts, onStep: (step) => onStep?.(run.issueId, step), onBeforeLog, ...extraContext },
         });
 
         // Enforce: result type must be declared in graph.
@@ -228,8 +267,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
         try {
           await effects[resultKey](run, result, {
               config,
-              clients: { git, prs, issues, notify, warp, board },
-              context: { log: (msg) => log(run.issueId, msg) },
+              clients: { git, prs, issues, notify, warp, board, log: (msg) => log(run.issueId, `[${executorName || act.name}] ${msg}`) },
             });
         } catch (err) {
           log(run.issueId, `warning: effect failed: ${err.message}`);
@@ -302,7 +340,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
             run.boardItem = itemsByIssueId.get(run.issueId);
           }
         }
-      } catch {}
+      } catch (err) { log(null, `warning: board item fetch failed: ${err.message}`); }
     }
 
     // Abort: if a run's issue is in the board's Aborted column, close the run.
@@ -322,7 +360,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
             openRuns.splice(i, 1);
           }
         }
-      } catch {}
+      } catch (err) { log(null, `warning: scan aborted failed: ${err.message}`); }
     }
 
     // Done: if a run's issue is manually moved to Done, close the run.
@@ -334,7 +372,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
             const run = openRuns[i];
             if (!run.issueId || !doneIds.has(run.issueId)) continue;
             try {
-              await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.SHIPPED });
+              await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.MANUAL_RELEASE });
               log(run.issueId, `shipped (moved to Done column)`);
             } catch (err) {
               log(run.issueId, `warning: ship failed: ${err.message}`);
@@ -342,7 +380,51 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
             openRuns.splice(i, 1);
           }
         }
-      } catch {}
+      } catch (err) { log(null, `warning: scan done failed: ${err.message}`); }
+    }
+
+    // Retry: re-emit last act when card leaves Blocked column.
+    if (board?.scanBlocked && apiKey) {
+      try {
+        const blockedIds = await board.scanBlocked();
+        const retriedIds = new Set();
+        for (const run of openRuns) {
+          if (run.pendingAct) continue;
+          if (!run.issueId) continue;
+          if (inFlight.has(run.issueId)) continue;
+          if (retriedIds.has(run.issueId)) continue;
+          if (blockedIds.has(run.issueId)) continue;
+
+          // Derive retry target from graph using the run's latest outcome.
+          const target = retryTargets[run.latestOutcome];
+          if (!target) continue;
+
+          const parentId = target.groupLabel ? run.groups?.get(target.groupLabel) : run.id;
+          if (!parentId) continue;
+
+          try {
+            const { outcomeId } = warp.batchOutcome(apiKey, {
+              runId: parentId, name: OUTCOMES.RESUMED,
+            });
+            const { actId } = warp.batchAct(apiKey, {
+              outcomeId, name: target.actName, opts: {},
+            });
+            await warp.batchFlush(apiKey);
+
+            run.pendingAct = { id: actId, name: target.actName, opts: {} };
+            retriedIds.add(run.issueId);
+            log(run.issueId, `retrying ${target.actName} (unblocked)`);
+
+            if (run.boardItem && target.boardState) {
+              board.syncState(run.boardItem, target.boardState).catch(err =>
+                log(run.issueId, `warning: board sync failed: ${err.message}`)
+              );
+            }
+          } catch (err) {
+            log(run.issueId, `warning: retry failed: ${err.message}`);
+          }
+        }
+      } catch (err) { log(null, `warning: scan blocked failed: ${err.message}`); }
     }
 
     // Process waiting-capable acts first (await_deploy, await_reply) — they

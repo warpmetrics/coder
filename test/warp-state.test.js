@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { TERMINAL_OUTCOMES, generateId, findPendingAct } from '../src/clients/warp.js';
+import { TERMINAL_OUTCOMES, generateId, findPendingAct, findLastExecutedAct } from '../src/clients/warp.js';
 import { OUTCOMES } from '../src/names.js';
 
 // ---------------------------------------------------------------------------
@@ -15,13 +15,8 @@ describe('TERMINAL_OUTCOMES', () => {
 
   it('contains all expected terminal outcomes', () => {
     const expected = [
-      OUTCOMES.SHIPPED,
+      OUTCOMES.MANUAL_RELEASE,
       OUTCOMES.RELEASED,
-      OUTCOMES.IMPLEMENTATION_FAILED,
-      OUTCOMES.REVISION_FAILED,
-      OUTCOMES.MAX_RETRIES,
-      OUTCOMES.MERGE_FAILED,
-      OUTCOMES.FAILED,
       OUTCOMES.ABORTED,
     ];
     for (const name of expected) {
@@ -41,19 +36,23 @@ describe('TERMINAL_OUTCOMES', () => {
       OUTCOMES.CHANGES_REQUESTED,
       OUTCOMES.FIXES_APPLIED,
       OUTCOMES.MERGED,
-      OUTCOMES.PAUSED,
       OUTCOMES.WAITING,
       OUTCOMES.NEEDS_CLARIFICATION,
       OUTCOMES.CLARIFIED,
       OUTCOMES.RELEASING,
+      OUTCOMES.IMPLEMENTATION_FAILED,
+      OUTCOMES.REVISION_FAILED,
+      OUTCOMES.MAX_RETRIES,
+      OUTCOMES.MERGE_FAILED,
+      OUTCOMES.REVIEW_FAILED,
     ];
     for (const name of nonTerminal) {
       assert.ok(!TERMINAL_OUTCOMES.has(name), `should NOT contain "${name}"`);
     }
   });
 
-  it('has exactly 8 members', () => {
-    assert.equal(TERMINAL_OUTCOMES.size, 8);
+  it('has exactly 3 members', () => {
+    assert.equal(TERMINAL_OUTCOMES.size, 3);
   });
 });
 
@@ -71,23 +70,21 @@ describe('TERMINAL_OUTCOMES vs CLASSIFICATIONS', () => {
     }
   });
 
-  it('failure classification outcomes are a superset of terminal failures', () => {
-    // Terminal outcomes that represent failures should all exist.
-    const failureTerminals = [
+  it('failure outcomes are not terminal (blocked, not closed)', () => {
+    const failureOutcomes = [
       OUTCOMES.IMPLEMENTATION_FAILED,
       OUTCOMES.REVISION_FAILED,
       OUTCOMES.MAX_RETRIES,
       OUTCOMES.MERGE_FAILED,
-      OUTCOMES.FAILED,
-      OUTCOMES.ABORTED,
+      OUTCOMES.REVIEW_FAILED,
     ];
-    for (const name of failureTerminals) {
-      assert.ok(TERMINAL_OUTCOMES.has(name), `"${name}" should be terminal`);
+    for (const name of failureOutcomes) {
+      assert.ok(!TERMINAL_OUTCOMES.has(name), `"${name}" should NOT be terminal`);
     }
   });
 
-  it('success terminal outcomes include SHIPPED and RELEASED', () => {
-    assert.ok(TERMINAL_OUTCOMES.has(OUTCOMES.SHIPPED));
+  it('success terminal outcomes include MANUAL_RELEASE and RELEASED', () => {
+    assert.ok(TERMINAL_OUTCOMES.has(OUTCOMES.MANUAL_RELEASE));
     assert.ok(TERMINAL_OUTCOMES.has(OUTCOMES.RELEASED));
   });
 });
@@ -275,5 +272,107 @@ describe('findPendingAct', () => {
     };
     // Last outcome has no acts, falls through to groups (none) → null
     assert.equal(findPendingAct(data), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findLastExecutedAct
+// ---------------------------------------------------------------------------
+
+describe('findLastExecutedAct', () => {
+
+  it('returns null for empty data', () => {
+    assert.equal(findLastExecutedAct({}), null);
+    assert.equal(findLastExecutedAct({ groups: [] }), null);
+  });
+
+  it('returns null when no acts have followUpRuns', () => {
+    const data = {
+      groups: [
+        { id: 'grp-1', label: 'Build', outcomes: [{ name: 'Building', acts: [{ id: 'act-1' }] }] },
+      ],
+    };
+    assert.equal(findLastExecutedAct(data), null);
+  });
+
+  it('returns null when acts have empty followUpRuns', () => {
+    const data = {
+      groups: [
+        { id: 'grp-1', label: 'Build', outcomes: [{ name: 'Building', acts: [{ id: 'act-1', followUpRuns: [] }] }] },
+      ],
+    };
+    assert.equal(findLastExecutedAct(data), null);
+  });
+
+  it('finds act with followUpRuns on a group', () => {
+    const data = {
+      groups: [
+        {
+          id: 'grp-1', label: 'Build',
+          outcomes: [{ name: 'Failed', acts: [{ id: 'act-1', name: 'Implement', opts: { repo: 'org/api' }, followUpRuns: [{ id: 'r-1' }] }] }],
+        },
+      ],
+    };
+    const result = findLastExecutedAct(data);
+    assert.ok(result);
+    assert.equal(result.act.id, 'act-1');
+    assert.equal(result.act.name, 'Implement');
+    assert.equal(result.parentId, 'grp-1');
+    assert.equal(result.parentLabel, 'Build');
+  });
+
+  it('uses newest group first', () => {
+    const data = {
+      groups: [
+        { id: 'grp-1', label: 'Build', outcomes: [{ name: 'X', acts: [{ id: 'act-1', followUpRuns: [{ id: 'r-1' }] }] }] },
+        { id: 'grp-2', label: 'Review', outcomes: [{ name: 'Y', acts: [{ id: 'act-2', followUpRuns: [{ id: 'r-2' }] }] }] },
+      ],
+    };
+    const result = findLastExecutedAct(data);
+    assert.ok(result);
+    assert.equal(result.parentId, 'grp-2');
+    assert.equal(result.act.id, 'act-2');
+  });
+
+  it('uses newest outcome within a group', () => {
+    const data = {
+      groups: [
+        {
+          id: 'grp-1', label: 'Build',
+          outcomes: [
+            { name: 'First', acts: [{ id: 'act-1', followUpRuns: [{ id: 'r-1' }] }] },
+            { name: 'Second', acts: [{ id: 'act-2', followUpRuns: [{ id: 'r-2' }] }] },
+          ],
+        },
+      ],
+    };
+    const result = findLastExecutedAct(data);
+    assert.ok(result);
+    assert.equal(result.act.id, 'act-2');
+  });
+
+  it('skips outcomes without acts', () => {
+    const data = {
+      groups: [
+        {
+          id: 'grp-1', label: 'Build',
+          outcomes: [
+            { name: 'First', acts: [{ id: 'act-1', followUpRuns: [{ id: 'r-1' }] }] },
+            { name: 'NoActs' },
+          ],
+        },
+      ],
+    };
+    const result = findLastExecutedAct(data);
+    assert.ok(result);
+    assert.equal(result.act.id, 'act-1');
+  });
+
+  it('only looks at groups, not run-level outcomes', () => {
+    const data = {
+      outcomes: [{ name: 'Started', acts: [{ id: 'act-run', followUpRuns: [{ id: 'r-1' }] }] }],
+      groups: [],
+    };
+    assert.equal(findLastExecutedAct(data), null);
   });
 });

@@ -5,24 +5,31 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { repoName, deriveRepoDirNames, CONFIG_DIR } from '../../config.js';
-import { fetchComments } from '../claude.js';
+import { fetchComments } from '../../clients/claude-code.js';
 import * as warp from '../../clients/warp.js';
 import { OUTCOMES, ACTS } from '../../names.js';
 import { safeHook } from '../../agent/hooks.js';
 import { loadMemory } from '../../agent/memory.js';
 import { reflect } from '../../agent/reflect.js';
-import { classifyIntentPrompt, buildImplementPrompt, IMPLEMENT_RESUME } from './prompt.js';
+import { classifyIntentPrompt, buildImplementPrompt } from './prompt.js';
 import { inferDeployPlan } from '../deploy/release.js';
+import { installSkills } from '../../agent/skills.js';
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
-async function classifyIntent(claudeCode, message, { model = 'sonnet' } = {}) {
+async function classifyIntent(claudeCode, message, log) {
   try {
-    const { result } = await claudeCode.oneShot(classifyIntentPrompt(message), { model, timeout: 15000 });
-    return result.trim().toUpperCase().includes('PROPOSE');
-  } catch { return false; }
+    const { result } = await claudeCode.run({ prompt: classifyIntentPrompt(message), maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: 60000, verbose: false });
+    const raw = result.trim();
+    const isPropose = raw.toUpperCase().includes('PROPOSE');
+    log(`  classifyIntent: "${raw}" → ${isPropose ? 'PROPOSE' : 'IMPLEMENT'}`);
+    return isPropose;
+  } catch (err) {
+    log(`  classifyIntent failed (defaulting to PROPOSE): ${err.message}`);
+    return true;
+  }
 }
 
 function setupWorkspace(git, repos, { workdir, branch, resume }) {
@@ -55,9 +62,9 @@ function discoverClonedRepos(repos, dirNames, workdir, repoDirs) {
   }
 }
 
-function reflectOnStep(config, configDir, step, opts, log) {
+function reflectOnStep(config, configDir, step, opts, log, claudeCode) {
   if (config.memory?.enabled === false) return;
-  reflect({ configDir, step, ...opts, hookOutputs: (opts.hookOutputs || []).filter(h => h.ran), maxLines: config.memory?.maxLines || 100 })
+  reflect({ configDir, step, ...opts, hookOutputs: (opts.hookOutputs || []).filter(h => h.ran), maxLines: config.memory?.maxLines || 100, claudeCode })
     .then(() => log('  reflect: memory updated'))
     .catch(() => {});
 }
@@ -100,17 +107,21 @@ function pushAndCreatePRs(git, prs, repoDirs, { branch, issueId, issueTitle, pri
 
 export const definition = {
   name: 'implement',
-  resultTypes: ['success', 'error', 'ask_user', 'max_turns'],
+  resultTypes: ['success', 'error', 'ask_user'],
   effects: {
+    async before(run, ctx) {
+      const { config, clients: { notify }, context: { actOpts } } = ctx;
+      if (actOpts && 'sessionId' in actOpts) return;
+      const primaryRepo = config.repoNames[0];
+      notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `Starting implementation...` });
+    },
     async success(run, result, ctx) {
-      const { config, clients: { notify, issues }, context: { log } } = ctx;
+      const { config, clients: { notify, issues, log } } = ctx;
       const primaryRepo = config.repoNames[0];
       const resultPrs = result.nextActOpts?.prs || [];
 
-      try {
-        const prList = resultPrs.map(p => `- ${p.repo}#${p.prNumber}`).join('\n');
-        notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, body: `PRs ready for review:\n\n${prList}` });
-      } catch {}
+      const prList = resultPrs.map(p => `- ${p.repo}#${p.prNumber}`).join('\n');
+      notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `PRs ready for review:\n\n${prList}` });
 
       const release = result.nextActOpts?.release || [];
       const repos = release.length > 0
@@ -126,22 +137,21 @@ export const definition = {
       }
     },
     async error(run, result, ctx) {
-      const { config, clients: { notify }, context: { log } } = ctx;
+      const { config, clients: { notify, log } } = ctx;
       const primaryRepo = config.repoNames[0];
       const error = result.error || 'Unknown error';
-      try {
-        notify.comment(run.issueId, {
-          repo: primaryRepo, runId: run.id,
-          body: `<!-- warp-coder:error\n${error}\n-->\n\nImplementation failed — needs human intervention.\n\n<details>\n<summary>Error details</summary>\n\n\`\`\`\n${error}\n\`\`\`\n</details>`,
-        });
-        log(`posted error comment`);
-      } catch {}
+      notify.comment(run.issueId, {
+        repo: primaryRepo, runId: run.id, title: run.title,
+        body: `<!-- warp-coder:error\n${error}\n-->\n\nImplementation failed — needs human intervention.\n\n<details>\n<summary>Error details</summary>\n\n\`\`\`\n${error}\n\`\`\`\n</details>`,
+      });
+      log(`posted error comment`);
     },
     async ask_user(run, result, ctx) {
-      const { config, clients: { notify }, context: { log } } = ctx;
+      const { config, clients: { notify, log } } = ctx;
       const primaryRepo = config.repoNames[0];
       const marker = `<!-- warp-coder:question -->`;
-      try { notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, body: `${marker}\n\nNeeds clarification:\n\n${result.question}` }); log(`posted clarification question`); } catch {}
+      notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `${marker}\n\nNeeds clarification:\n\n${result.question}` });
+      log(`posted clarification question`);
     },
   },
   create() {
@@ -151,30 +161,20 @@ export const definition = {
       const r = await implement(item, { config, clients, context, resumeSession: context.actOpts?.sessionId || undefined });
 
       if (r.type === 'success') {
-        return { ...r, outcomeOpts: { issueNumber: run.issueId },
+        return { ...r, outcomeOpts: { ...r.outcomeOpts, issueNumber: run.issueId },
           nextActOpts: { prs: r.prs, release: r.deployPlan?.release || [], sessionId: r.sessionId } };
       }
       if (r.type === 'ask_user') {
-        return { ...r, outcomeOpts: { issueNumber: run.issueId },
+        return { ...r, outcomeOpts: { ...r.outcomeOpts, issueNumber: run.issueId },
           nextActOpts: { sessionId: r.sessionId } };
       }
-      if (r.type === 'max_turns') {
-        const retryCount = (context.actOpts?.retryCount || 0) + 1;
-        const limit = config.maxTurnsRetries || 3;
-        if (retryCount >= limit) {
-          context.log(`max_turns limit reached (${retryCount}/${limit}), giving up`);
-          return { type: 'error', error: `Hit max turns ${retryCount} times without completing`, costUsd: r.costUsd, trace: r.trace, outcomeOpts: { issueNumber: run.issueId } };
-        }
-        return { ...r, outcomeOpts: { issueNumber: run.issueId },
-          nextActOpts: { sessionId: r.sessionId, retryCount } };
-      }
-      return { ...r, outcomeOpts: { issueNumber: run.issueId } };
+      return { ...r, outcomeOpts: { ...r.outcomeOpts, issueNumber: run.issueId } };
     };
   },
 };
 
 export async function implement(item, ctx) {
-  const { config, clients: { git, prs, issues, claudeCode }, context: { log, onStep, onBeforeLog }, resumeSession } = ctx;
+  const { config, clients: { git, prs, issues, claudeCode, log }, context: { onStep, onBeforeLog }, resumeSession } = ctx;
   const issueId = item._issueId;
   const issueTitle = item.content?.title || `Issue #${issueId}`;
   const issueBody = item.content?.body || '';
@@ -186,21 +186,37 @@ export async function implement(item, ctx) {
   const hookOutputs = [];
   const prActReserved = config.warpmetricsApiKey ? warp.reserveAct(ACTS.REVIEW) : null;
 
+  // Short-circuit: if open PRs already exist for this issue, skip to review.
+  if (!resumeSession) {
+    const repoNames = repos.map(r => repoName(r));
+    const existingPRs = prs.findAllPRs(issueId, repoNames, { branchPattern: branch });
+    if (existingPRs.length > 0) {
+      log(`  found existing PR(s): ${existingPRs.map(p => `${p.repo}#${p.prNumber}`).join(', ')} — skipping to review`);
+      return {
+        type: 'success', costUsd: 0, trace: null, sessionId: null,
+        prs: existingPRs.map(p => ({ repo: p.repo, prNumber: p.prNumber })),
+        deployPlan: null, deployPlanFailed: false,
+      };
+    }
+  }
+
   // 1. Workspace
 
   const { repoDirs, dirNames, resumed } = setupWorkspace(git, repos, { workdir, branch, resume: resumeSession });
   if (!resumed) safeHook('onBranchCreate', config, { workdir, issueNumber: issueId, branch, repo: primaryRepo }, hookOutputs);
   log(resumed ? `  resuming in ${workdir}` : `  cloned ${primaryRepo}, branch: ${branch}`);
+  const skillCount = installSkills(configDir, workdir);
+  if (skillCount) log(`  installed ${skillCount} skill(s)`);
 
   try {
     // 2. Context
-    const { commentsText, lastHumanMessage } = fetchComments(issues, issueId, primaryRepo);
+    const { commentsText, lastHumanMessage } = fetchComments(issues, issueId, primaryRepo, log);
     const memory = config.memory?.enabled !== false ? loadMemory(configDir) : '';
-    const shouldPropose = await classifyIntent(claudeCode, lastHumanMessage || issueBody, { model: config.quickModel || 'sonnet' });
+    const shouldPropose = await classifyIntent(claudeCode, lastHumanMessage || issueBody, log);
 
     // 3. Prompt
     const repoUrls = repos.map(r => r.url);
-    const prompt = resumed ? IMPLEMENT_RESUME : buildImplementPrompt({
+    const prompt = buildImplementPrompt({
       workdir, repos: repoUrls, repoNames: repos.map(repoName), dirNames,
       primaryDirName: dirNames[0], primaryRepoName: primaryRepo, branch,
       issueId, issueTitle, issueBody, memory, commentsText, shouldPropose,
@@ -217,14 +233,18 @@ export async function implement(item, ctx) {
     log(`  claude done (cost: $${result.costUsd ?? '?'})`);
 
     if (result.hitMaxTurns) {
-      return { type: 'max_turns', sessionId: result.sessionId, costUsd: result.costUsd, trace: result.trace,
-        outcomeOpts: { name: OUTCOMES.MAX_RETRIES } };
+      const question = shouldPropose
+        ? 'Ran out of turns before finishing the proposal. Please simplify the request or break it into smaller pieces.'
+        : (result.result || 'I ran out of turns before finishing.');
+      return { type: 'ask_user', question,
+        sessionId: result.sessionId, costUsd: result.costUsd, trace: result.trace,
+        outcomeOpts: { name: OUTCOMES.NEEDS_CLARIFICATION } };
     }
 
     // 5. Proposal check
     if (shouldPropose) {
-      return { type: 'ask_user', question: result.result, sessionId: result.sessionId,
-        costUsd: result.costUsd, trace: result.trace,
+      return { type: 'ask_user', question: result.result,
+        sessionId: result.sessionId, costUsd: result.costUsd, trace: result.trace,
         outcomeOpts: { name: OUTCOMES.NEEDS_CLARIFICATION } };
     }
 
@@ -243,16 +263,16 @@ export async function implement(item, ctx) {
     let deployPlanFailed = false;
     try {
       const prRepos = createdPRs.map(p => ({ repo: p.repo }));
-      deployPlan = await inferDeployPlan(claudeCode, result.sessionId, prRepos, config.deploy, workdir, { model: config.quickModel || 'sonnet', log });
+      deployPlan = await inferDeployPlan(claudeCode, result.sessionId, prRepos, config.deploy, workdir, { log });
     } catch (err) {
       deployPlanFailed = true;
       log(`  warning: deploy plan inference failed: ${err.message}`);
     }
 
-    reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: true, hookOutputs, claudeOutput: result.result }, log);
+    reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: true, hookOutputs, claudeOutput: result.result }, log, claudeCode);
     return { type: 'success', costUsd: result.costUsd, trace: result.trace, sessionId: result.sessionId, prs: createdPRs.map(p => ({ repo: p.repo, prNumber: p.number })), deployPlan, deployPlanFailed };
   } catch (err) {
-    reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: false, error: err.message, hookOutputs }, log);
+    reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: false, error: err.message, hookOutputs }, log, claudeCode);
     return { type: 'error', error: err.message, costUsd: null, trace: null };
   }
 }

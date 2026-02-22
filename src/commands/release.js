@@ -8,9 +8,10 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { loadConfig } from '../config.js';
 import * as warp from '../clients/warp.js';
-import * as git from '../clients/git.js';
+import { createGitClient } from '../clients/git.js';
 import { createPRClient } from '../clients/prs/index.js';
 import { topoSort, mergeDAGs, buildSteps } from '../executors/deploy/plan.js';
+import { rawRun } from '../clients/claude-code.js';
 import { createChangelogProvider, generateChangelogEntry } from '../executors/release/changelog.js';
 import { PUBLIC_CHANGELOG as PUBLIC_PROMPT, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from '../executors/release/prompt.js';
 import { OUTCOMES } from '../names.js';
@@ -31,6 +32,7 @@ function parsePRList(prList) {
 
 export async function release() {
   const config = loadConfig();
+  const git = createGitClient({ token: config.githubToken });
   const apiKey = config.warpmetricsApiKey;
 
   if (!apiKey) {
@@ -449,9 +451,9 @@ async function generateChangelog(config, { issues, verbose = false }) {
   console.log('  Generating changelog entries...');
   if (verbose) console.log('');
 
-  const modelOpts = config.quickModel ? { model: config.quickModel } : {};
-  const publicEntry = generateChangelogEntry(execFileSync, `${PUBLIC_PROMPT}\n\n---\n\n${context}`, modelOpts);
-  const privateEntry = generateChangelogEntry(execFileSync, `${PRIVATE_PROMPT}\n\n---\n\n${context}`, modelOpts);
+  const claudeCode = { run: (opts) => rawRun(opts) };
+  const publicEntry = generateChangelogEntry(claudeCode, `${PUBLIC_PROMPT}\n\n---\n\n${context}`);
+  const privateEntry = generateChangelogEntry(claudeCode, `${PRIVATE_PROMPT}\n\n---\n\n${context}`);
 
   if (!publicEntry && !privateEntry) {
     console.log('  Changelog generation failed.');

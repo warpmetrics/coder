@@ -12,6 +12,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { review } from './index.js';
+import { createClaudeCodeClient } from '../../clients/claude-code.js';
 
 // ---------------------------------------------------------------------------
 // Git helpers
@@ -31,8 +32,6 @@ const BASE = join(tmpdir(), `warp-review-integration-${Date.now()}`);
 const BARE_REPO = join(BASE, 'bare.git');
 const SRC_REPO = join(BASE, 'src-repo');
 const WORKDIR = join(tmpdir(), 'warp-coder', String(ISSUE_ID));
-
-let diff = '';
 
 function setupGitRepos() {
   mkdirSync(BASE, { recursive: true });
@@ -86,13 +85,10 @@ function setupGitRepos() {
   git(['add', '.'], { cwd: SRC_REPO });
   git(['commit', '-m', 'fix: add input validation and password hashing'], { cwd: SRC_REPO });
   git(['push', 'origin', BRANCH], { cwd: SRC_REPO });
-
-  // 4. Compute diff for the codehost
-  diff = git(['diff', `main...${BRANCH}`], { cwd: SRC_REPO });
 }
 
 // ---------------------------------------------------------------------------
-// Test clients — real clone, real diff, captured submitReview
+// Test clients — real clone, real Claude, captured submitReview
 // ---------------------------------------------------------------------------
 
 function createTestGit() {
@@ -110,7 +106,6 @@ function createTestPRs() {
   return {
     findAllPRs: () => [{ repo: repoId, prNumber: 1 }],
     getPRBranch: () => BRANCH,
-    getPRDiff: () => diff,
     submitReview: (prNumber, opts) => {
       submitted.push({ prNumber, ...opts });
     },
@@ -136,7 +131,7 @@ function createTestIssues() {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('review executor (integration)', { timeout: 120_000 }, () => {
+describe('review executor (integration)', { timeout: 180_000 }, () => {
 
   before(() => {
     // Check claude is available
@@ -158,15 +153,18 @@ describe('review executor (integration)', { timeout: 120_000 }, () => {
     try { rmSync(WORKDIR, { recursive: true, force: true }); } catch {}
   });
 
-  it('reviews a PR end-to-end: clone, build prompt, spawn Claude, parse verdict, submit review', async () => {
+  it('reviews a PR end-to-end: clone, review, parse verdict, submit review', async () => {
     const gitClient = createTestGit();
     const prs = createTestPRs();
     const issues = createTestIssues();
+    const claudeCode = createClaudeCodeClient({ warp: { traceClaudeCall: () => {} }, config: {} });
     const logs = [];
     const steps = [];
 
+    const repoId = BARE_REPO.replace(/\.git$/, '');
     const config = {
       repos: [{ url: BARE_REPO }],
+      repoNames: [repoId],
       claude: { reviewMaxTurns: 10 },
     };
 
@@ -174,12 +172,11 @@ describe('review executor (integration)', { timeout: 120_000 }, () => {
       { _issueId: ISSUE_ID, content: { title: 'Fix auth input validation and password hashing' } },
       {
         config,
-        git: gitClient,
-        prs,
-        issues,
-        log: msg => { logs.push(msg); process.stderr.write(`  ${msg}\n`); },
-        onStep: step => steps.push(step),
-        repoNames: [BARE_REPO.replace(/\.git$/, '')],
+        clients: { git: gitClient, prs, issues, claudeCode, log: msg => { logs.push(msg); process.stderr.write(`  ${msg}\n`); } },
+        context: {
+          onStep: step => steps.push(step),
+          onBeforeLog: () => {},
+        },
       },
     );
 
@@ -196,7 +193,6 @@ describe('review executor (integration)', { timeout: 120_000 }, () => {
     // --- Steps executed in order ---
     assert.ok(steps.includes('finding PRs'), 'should find PRs');
     assert.ok(steps.includes('cloning'), 'should clone');
-    assert.ok(steps.includes('gathering context'), 'should gather context');
     assert.ok(steps.includes('reviewing'), 'should review');
     assert.ok(steps.includes('submitting review'), 'should submit review');
 

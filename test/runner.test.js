@@ -1,8 +1,9 @@
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRunner } from '../src/runner.js';
 import { GRAPH, STATES } from '../src/machine.js';
 import { OUTCOMES, ACTS } from '../src/names.js';
+import { implement } from '../src/executors/implement/index.js';
 
 // ---------------------------------------------------------------------------
 // Mock factory
@@ -67,10 +68,8 @@ function createMocks() {
   const claudeCode = {
     forRun: (pipelineRunId) => ({
       run: async () => ({ result: '', costUsd: 0, trace: null, sessionId: null }),
-      oneShot: async () => ({ result: '', costUsd: 0 }),
     }),
     run: async () => ({ result: '', costUsd: 0, trace: null, sessionId: null }),
-    oneShot: async () => ({ result: '', costUsd: 0 }),
   };
 
   const config = {
@@ -233,34 +232,6 @@ describe('processRun (act-driven)', () => {
     assert.equal(sync.args[1], 'inReview');
   });
 
-  it('IMPLEMENT max_turns → PAUSED on Build group + board sync on Issue Run', async () => {
-    const m = createMocks();
-    m.execute.implement = async () => ({
-      type: 'max_turns', sessionId: 'sess1', costUsd: 0.5, trace: null, outcomeOpts: {},
-      nextActOpts: { sessionId: 'sess1', retryCount: 1 },
-    });
-    await runSingle(m, makeRun({
-      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
-      parentEntityId: 'build-group-1',
-      parentEntityLabel: 'Build',
-    }));
-
-    const ocs = batchOutcomes(m.calls);
-    // Within-phase: recorded on Build group
-    const groupOc = ocs.find(c => c.args[1].runId === 'build-group-1');
-    assert.ok(groupOc);
-    assert.equal(groupOc.args[1].name, OUTCOMES.PAUSED);
-
-    // Board sync: implicit recording on Issue Run
-    const issueOc = ocs.find(c => c.args[1].runId === 'run-1');
-    assert.ok(issueOc, 'should board-sync on Issue Run');
-    assert.equal(issueOc.args[1].name, OUTCOMES.PAUSED);
-
-    const emitAct = m.calls.find(c => c.name === 'batchAct');
-    assert.equal(emitAct.args[1].name, ACTS.IMPLEMENT);
-    assert.equal(emitAct.args[1].opts.sessionId, 'sess1');
-  });
-
   it('IMPLEMENT ask_user → NEEDS_CLARIFICATION on Build group + AWAIT_REPLY emitted + effect', async () => {
     const m = createMocks();
     let effectCalled = false;
@@ -357,7 +328,7 @@ describe('processRun (act-driven)', () => {
 
     const ocs = batchOutcomes(m.calls);
     const groupOc = ocs.find(c => c.args[1].runId === 'review-group-1');
-    assert.equal(groupOc.args[1].name, OUTCOMES.FAILED);
+    assert.equal(groupOc.args[1].name, OUTCOMES.REVIEW_FAILED);
 
     const emitAct = m.calls.find(c => c.name === 'batchAct');
     assert.equal(emitAct.args[1].name, ACTS.EVALUATE);
@@ -1010,6 +981,342 @@ describe('resultType enforcement', () => {
     const errorLog = m.logs.find(l => l.msg.includes('undeclared result type'));
     assert.ok(errorLog, 'should reject undeclared type in custom graph');
     assert.ok(errorLog.msg.includes('failure'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retry from Blocked tests
+// ---------------------------------------------------------------------------
+
+describe('retry from blocked', () => {
+  it('retries Implement when latestOutcome is Implementation Failed', async () => {
+    const m = createMocks();
+    m.execute.implement = async () => ({
+      type: 'success', costUsd: 0.5, trace: null, outcomeOpts: {},
+      nextActOpts: { prs: [{ repo: 'owner/repo', prNumber: 1 }], release: [] },
+    });
+
+    // Run blocked with Implementation Failed, no pendingAct.
+    // Board returns empty blocked set → card was moved out of Blocked.
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+      groups: new Map([['Build', 'build-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+    await new Promise(r => setTimeout(r, 0));
+
+    // Should record RESUMED outcome on the Build group
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.ok(resumedOc, 'should record RESUMED outcome');
+    assert.equal(resumedOc.args[1].runId, 'build-group-1');
+
+    // Should re-emit Implement
+    const reEmit = m.calls.find(c => c.name === 'batchAct');
+    assert.ok(reEmit, 'should re-emit the act');
+    assert.equal(reEmit.args[1].name, ACTS.IMPLEMENT);
+
+    assert.ok(m.calls.find(c => c.name === 'batchFlush'), 'should flush');
+
+    const retryLog = m.logs.find(l => l.msg.includes('retrying') && l.msg.includes('Implement'));
+    assert.ok(retryLog, 'should log retry');
+  });
+
+  it('retries Evaluate when latestOutcome is Failed (review max_retries)', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.REVIEW_FAILED,
+      groups: new Map([['Build', 'build-group-1'], ['Review', 'review-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.ok(resumedOc, 'should record RESUMED outcome');
+    assert.equal(resumedOc.args[1].runId, 'review-group-1');
+
+    const reEmit = m.calls.find(c => c.name === 'batchAct');
+    assert.equal(reEmit.args[1].name, ACTS.EVALUATE);
+  });
+
+  it('retries Merge when latestOutcome is Merge Failed', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.MERGE_FAILED,
+      groups: new Map([['Build', 'b1'], ['Review', 'review-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const reEmit = m.calls.find(c => c.name === 'batchAct');
+    assert.ok(reEmit, 'should re-emit act');
+    assert.equal(reEmit.args[1].name, ACTS.MERGE);
+  });
+
+  it('does not retry when card is still in Blocked column', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+      groups: new Map([['Build', 'build-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set([42]);
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.equal(resumedOc, undefined, 'should not record RESUMED when still blocked');
+  });
+
+  it('does not retry when issue is already in-flight', async () => {
+    const m = createMocks();
+    // Hang the implement executor so the run stays in-flight
+    let resolveExecutor;
+    m.execute = { implement: () => new Promise(resolve => { resolveExecutor = resolve; }) };
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+      groups: new Map([['Build', 'build-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll(); // first poll: retries, dispatches implement, now in-flight
+
+    // Second poll while first is still running
+    m.calls.length = 0; // clear call log
+    await runner.poll();
+
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.equal(resumedOc, undefined, 'should not retry when issue is in-flight');
+
+    // Clean up: resolve the executor so waitForInFlight doesn't hang
+    resolveExecutor?.({ type: 'success' });
+    await runner.waitForInFlight();
+  });
+
+  it('does not retry when run already has a pendingAct', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
+      latestOutcome: OUTCOMES.BUILDING,
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.equal(resumedOc, undefined, 'should not retry when pendingAct exists');
+  });
+
+  it('does not retry when latestOutcome is not a terminal failure', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.PR_CREATED, // not a terminal failure
+      groups: new Map([['Build', 'build-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.equal(resumedOc, undefined, 'should not retry non-terminal outcomes');
+  });
+
+  it('deduplicates retries by issueId (multiple open runs for same issue)', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [
+      makeRun({
+        id: 'run-old', pendingAct: null,
+        latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+        groups: new Map([['Build', 'grp-old']]),
+      }),
+      makeRun({
+        id: 'run-new', pendingAct: null,
+        latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+        groups: new Map([['Build', 'grp-new']]),
+      }),
+    ];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const resumed = m.calls.filter(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.equal(resumed.length, 1, 'should only retry once per issueId');
+  });
+
+  it('syncs board to inProgress on retry (Build phase)', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+      groups: new Map([['Build', 'build-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+    await new Promise(r => setTimeout(r, 0));
+
+    const sync = m.calls.find(c => c.name === 'syncState');
+    assert.ok(sync, 'should sync board on retry');
+    assert.equal(sync.args[1], 'inProgress');
+  });
+
+  it('syncs board to inReview on retry (Review phase)', async () => {
+    const m = createMocks();
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.REVIEW_FAILED, // review max_retries terminal outcome
+      groups: new Map([['Review', 'review-group-1']]),
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+    await new Promise(r => setTimeout(r, 0));
+
+    const sync = m.calls.find(c => c.name === 'syncState');
+    assert.ok(sync, 'should sync board on retry');
+    assert.equal(sync.args[1], 'inReview');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Implement short-circuit tests
+// ---------------------------------------------------------------------------
+
+describe('implement short-circuit when PRs exist', () => {
+  it('returns success without calling Claude when PRs already exist', async () => {
+    let claudeCalled = false;
+    const logs = [];
+    const item = { _issueId: 42, content: { title: 'Test issue', body: '' } };
+    const ctx = {
+      config: {
+        repos: [{ url: 'https://github.com/owner/repo' }],
+        warpmetricsApiKey: null,
+      },
+      clients: {
+        git: {},
+        prs: {
+          findAllPRs: (issueId, repoNames, opts) => [
+            { repo: 'owner/repo', prNumber: 7 },
+          ],
+        },
+        issues: {},
+        claudeCode: {
+          run: async () => { claudeCalled = true; return { result: '', costUsd: 0, trace: null, sessionId: null }; },
+        },
+        log: (msg) => logs.push(msg),
+      },
+      context: { onStep: null, onBeforeLog: null },
+      resumeSession: undefined,
+    };
+
+    const result = await implement(item, ctx);
+
+    assert.equal(result.type, 'success');
+    assert.equal(result.costUsd, 0);
+    assert.deepEqual(result.prs, [{ repo: 'owner/repo', prNumber: 7 }]);
+    assert.equal(result.deployPlan, null);
+    assert.equal(result.sessionId, null);
+    assert.equal(claudeCalled, false, 'should not call Claude');
+    assert.ok(logs.some(l => l.includes('existing PR(s)') && l.includes('owner/repo#7')), 'should log existing PRs');
+  });
+
+  it('does not short-circuit when resumeSession is set', async () => {
+    let findAllPRsCalled = false;
+    const item = { _issueId: 42, content: { title: 'Test issue', body: '' } };
+    const ctx = {
+      config: {
+        repos: [{ url: 'https://github.com/owner/repo' }],
+        warpmetricsApiKey: null,
+        memory: { enabled: false },
+      },
+      clients: {
+        git: {
+          clone: () => {},
+          createBranch: () => {},
+          status: () => false,
+          getCurrentBranch: () => 'agent/issue-42',
+          hasNewCommits: () => false,
+        },
+        prs: {
+          findAllPRs: () => { findAllPRsCalled = true; return [{ repo: 'owner/repo', prNumber: 7 }]; },
+        },
+        issues: { getComments: () => [] },
+        claudeCode: {
+          run: async () => ({ result: '', costUsd: 0, trace: null, sessionId: 's1', hitMaxTurns: false }),
+        },
+        log: () => {},
+      },
+      context: { onStep: null, onBeforeLog: null },
+      resumeSession: 'existing-session-id',
+    };
+
+    // With resumeSession, it should NOT short-circuit. It will proceed and
+    // eventually fail (since mocks are minimal), but findAllPRs should not be called.
+    try { await implement(item, ctx); } catch {}
+    assert.equal(findAllPRsCalled, false, 'should not call findAllPRs when resumeSession is set');
+  });
+
+  it('does not short-circuit when no PRs exist', async () => {
+    let claudeCalled = false;
+    const item = { _issueId: 42, content: { title: 'Test issue', body: '' } };
+    const ctx = {
+      config: {
+        repos: [{ url: 'https://github.com/owner/repo' }],
+        warpmetricsApiKey: null,
+        memory: { enabled: false },
+      },
+      clients: {
+        git: {
+          clone: () => {},
+          createBranch: () => {},
+          status: () => false,
+          getCurrentBranch: () => 'agent/issue-42',
+          hasNewCommits: () => false,
+        },
+        prs: {
+          findAllPRs: () => [],
+        },
+        issues: { getComments: () => [] },
+        claudeCode: {
+          run: async () => { claudeCalled = true; return { result: '', costUsd: 0, trace: null, sessionId: null, hitMaxTurns: false }; },
+        },
+        log: () => {},
+      },
+      context: { onStep: null, onBeforeLog: null },
+      resumeSession: undefined,
+    };
+
+    // No PRs found, so it should proceed to Claude (which will be called)
+    // It will error at pushAndCreatePRs but Claude should be called
+    try { await implement(item, ctx); } catch {}
+    assert.equal(claudeCalled, true, 'should call Claude when no existing PRs');
   });
 });
 
