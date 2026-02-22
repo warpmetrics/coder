@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT = TIMEOUTS.CLAUDE;
 // Raw subprocess runner
 // ---------------------------------------------------------------------------
 
-export function rawRun({ prompt, workdir, allowedTools, disallowedTools, maxTurns, resume, jsonSchema, noSessionPersistence, timeout = DEFAULT_TIMEOUT, verbose = true, logPrefix = '', onBeforeLog }) {
+export function rawRun({ prompt, workdir, tools, allowedTools, disallowedTools, maxTurns, resume, jsonSchema, noSessionPersistence, timeout = DEFAULT_TIMEOUT, verbose = true, logPrefix = '', onBeforeLog }) {
   return new Promise((resolve, reject) => {
     const args = [
       '-p', prompt,
@@ -19,10 +19,16 @@ export function rawRun({ prompt, workdir, allowedTools, disallowedTools, maxTurn
     ];
     if (resume) args.push('--resume', resume);
     if (noSessionPersistence) args.push('--no-session-persistence');
-    if (allowedTools) args.push('--allowedTools', allowedTools);
+    if (tools != null) args.push('--tools', tools);
+    if (allowedTools != null) args.push('--allowedTools', allowedTools);
     if (disallowedTools) args.push('--disallowedTools', ...disallowedTools);
     if (maxTurns) args.push('--max-turns', String(maxTurns));
-    if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
+    if (jsonSchema) {
+      // Strip $schema field — Claude Code fails to register the StructuredOutput
+      // tool when the JSON schema includes a $schema meta-identifier.
+      const { $schema, ...schema } = jsonSchema;
+      args.push('--json-schema', JSON.stringify(schema));
+    }
 
     const proc = spawn('claude', args, {
       cwd: workdir,
@@ -170,6 +176,7 @@ export function createClaudeCodeClient({ warp, apiKey, config }) {
       result = await rawRun({
         prompt,
         workdir: workdir || process.cwd(),
+        tools: opts.tools,
         allowedTools: opts.allowedTools ?? config.claude?.allowedTools,
         disallowedTools: opts.disallowedTools,
         maxTurns: opts.maxTurns ?? config.claude?.maxTurns,

@@ -2,7 +2,7 @@
 
 export const TIMEOUTS = {
   CLAUDE: 60 * 60 * 1000,       // claude-code.js — max runtime for a Claude subprocess
-  CLAUDE_QUICK: 60_000,         // quick single-turn Claude calls (classify, reflect, changelog)
+  CLAUDE_QUICK: 120_000,        // quick single-turn Claude calls (classify, reflect, changelog)
   HOOK: 5 * 60 * 1000,          // hooks.js — max runtime for a hook command
   DEPLOY: 10 * 60 * 1000,       // deploy/index.js — max runtime for a deploy step
   API_FETCH: 15_000,             // warp.js — timeout for API fetch calls

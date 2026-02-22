@@ -29,13 +29,13 @@ async function _reflect({ configDir, step, issue, prNumber, success, error, hook
 
   let result;
   if (claudeCode) {
-    result = await claudeCode.run({ prompt, maxTurns: 1, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
+    result = await claudeCode.run({ prompt, maxTurns: 10, noSessionPersistence: true, tools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
   } else {
     result = await rawRun({
       prompt,
       workdir: process.cwd(),
-      allowedTools: '',
-      maxTurns: 1,
+      tools: '',
+      maxTurns: 10,
       noSessionPersistence: true,
       timeout: TIMEOUTS.CLAUDE_QUICK,
       verbose: false,

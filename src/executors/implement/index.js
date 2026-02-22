@@ -23,16 +23,16 @@ import { gitExclude } from '../../agent/workspace.js';
 
 async function classifyIntent(claudeCode, message, log) {
   try {
-    const res = await claudeCode.run({ prompt: classifyIntentPrompt(message), jsonSchema: INTENT_SCHEMA, maxTurns: 10, noSessionPersistence: true, allowedTools: '', timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
+    const res = await claudeCode.run({ prompt: classifyIntentPrompt(message), jsonSchema: INTENT_SCHEMA, maxTurns: 2, noSessionPersistence: true, timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
     let intent = res.structuredOutput?.intent;
     if (!intent) {
-      // Fallback: parse from text
+      // Fallback: parse from text (in case structuredOutput isn't populated but result is JSON)
       const parsed = IntentSchema.safeParse(typeof res.result === 'string' ? (() => { try { return JSON.parse(res.result); } catch { return null; } })() : res.result);
       if (parsed?.success) intent = parsed.data.intent;
     }
     if (!intent) {
-      // Last resort: text matching
-      intent = res.result?.trim().toUpperCase().includes('PROPOSE') ? 'PROPOSE' : 'IMPLEMENT';
+      log(`  classifyIntent: no structured output, defaulting to PROPOSE`);
+      return true;
     }
     const isPropose = intent === 'PROPOSE';
     log(`  classifyIntent: ${intent} → ${isPropose ? 'PROPOSE' : 'IMPLEMENT'}`);
