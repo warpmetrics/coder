@@ -21,15 +21,9 @@ if (command === 'watch') {
   const configDir = join(process.cwd(), CONFIG_DIR);
   const memory = loadMemory(configDir);
   console.log(memory || '(no memory yet)');
-} else if (command === 'release') {
-  const preview = process.argv.includes('--preview');
-  if (preview) {
-    const { releasePreview } = await import('../src/commands/release.js');
-    await releasePreview();
-  } else {
-    const { release } = await import('../src/commands/release.js');
-    await release();
-  }
+} else if (command === 'reset') {
+  const { reset } = await import('../src/commands/reset.js');
+  await reset(process.argv.slice(3));
 } else if (command === 'debug') {
   const { debug } = await import('../src/commands/debug.js');
   await debug(process.argv.slice(3));
@@ -60,8 +54,7 @@ if (command === 'watch') {
   console.log('  Usage:');
   console.log('    warp-coder init      Set up config for a project');
   console.log('    warp-coder watch     Start the poll loop');
-  console.log('    warp-coder release             Release shipped issues (packages + deploys)');
-  console.log('    warp-coder release --preview   Preview changelog entries without releasing');
+  console.log('    warp-coder reset <issue#> [phase]          Reset a stuck run to a checkpoint');
   console.log('    warp-coder debug [issue#] [--title "..."]  Interactive state machine testing');
   console.log('    warp-coder verify    Verify state machine graph consistency');
   console.log('    warp-coder memory    Print current memory file');
@@ -166,7 +159,7 @@ async function runInit() {
     let columns = { todo: 'Todo', inProgress: 'In Progress', inReview: 'In Review', deploy: 'Deploy', done: 'Done', blocked: 'Blocked', waiting: 'Waiting' };
     try {
       log('  Discovering project fields...');
-      const fields = discoverProjectFields(parseInt(projectNumber, 10), owner);
+      const fields = await discoverProjectFields(parseInt(projectNumber, 10), owner);
       const statusField = fields.find(f => f.name === 'Status');
       if (statusField?.options) {
         const available = statusField.options.map(o => o.name);

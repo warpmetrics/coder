@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 
 const MEMORY_FILE = 'memory.md';
@@ -13,5 +13,8 @@ export function loadMemory(configDir) {
 
 export function saveMemory(configDir, content) {
   mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, MEMORY_FILE), content);
+  const dest = join(configDir, MEMORY_FILE);
+  const tmp = dest + '.tmp';
+  writeFileSync(tmp, content);
+  renameSync(tmp, dest);
 }

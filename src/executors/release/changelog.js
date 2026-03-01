@@ -1,5 +1,5 @@
 // Changelog provider — abstracts where changelog entries are stored.
-// Providers: "warpmetrics" (POST to API), "file" (write to local JSON files).
+// Providers: "api" (POST to a URL), "file" (write to local JSON files).
 
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -35,8 +35,8 @@ export function createChangelogProvider(config) {
   const changelog = config.changelog;
   if (!changelog?.provider) return null;
 
-  if (changelog.provider === 'warpmetrics') {
-    return createWarpmetricsProvider(changelog);
+  if (changelog.provider === 'api') {
+    return createApiProvider(changelog);
   }
 
   if (changelog.provider === 'file') {
@@ -46,8 +46,9 @@ export function createChangelogProvider(config) {
   return null;
 }
 
-function createWarpmetricsProvider({ url, token }) {
-  const apiUrl = url || 'https://api.warpmetrics.com';
+function createApiProvider({ url, token }) {
+  if (!url) throw new Error('Changelog "api" provider requires a "url" in config.');
+  const apiUrl = url;
 
   return {
     async post({ title, publicEntry, privateEntry, publicEntryVisible, tags }) {

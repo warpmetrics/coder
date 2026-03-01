@@ -1,68 +1,77 @@
 // GitHub PR + review operations.
 // Wraps `gh` CLI commands for PR lifecycle, reviews, and discovery.
 
-import { execFileSync } from 'child_process';
+import { execAsync } from '../exec.js';
+import { TIMEOUTS } from '../../defaults.js';
 
-function gh(args, opts = {}) {
-  return execFileSync('gh', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], ...opts }).trim();
+async function gh(args, opts = {}) {
+  try {
+    const out = await execAsync('gh', args, { timeout: TIMEOUTS.GH, ...opts });
+    return out.trim();
+  } catch (err) {
+    const stderr = err.stderr?.toString().trim();
+    const msg = stderr || err.message?.split('\n')[0] || 'gh command failed';
+    throw new Error(msg);
+  }
 }
 
 export function create({ reviewToken } = {}) {
   let prCache = new Map();
 
   return {
-    createPR(dir, { title, body, base, head }) {
+    async createPR(dir, { title, body, base, head }) {
       const args = ['pr', 'create', '--title', title, '--body-file', '-'];
       if (base) args.push('--base', base);
       if (head) args.push('--head', head);
-      const out = gh(args, { cwd: dir, input: body });
+      const out = await gh(args, { cwd: dir, input: body });
       const lines = out.split('\n');
       const url = lines[lines.length - 1];
       const match = url.match(/\/pull\/(\d+)/);
-      return { url, number: match ? parseInt(match[1], 10) : null };
+      if (!match) throw new Error(`Could not extract PR number from gh output: ${out.slice(0, 200)}`);
+      return { url, number: parseInt(match[1], 10) };
     },
 
-    mergePR(prNumber, { repo }) {
-      gh(['pr', 'merge', String(prNumber), '--squash', '--delete-branch', '--repo', repo]);
+    async mergePR(prNumber, { repo }) {
+      await gh(['pr', 'merge', String(prNumber), '--squash', '--delete-branch', '--repo', repo]);
     },
 
-    getPRState(prNumber, { repo }) {
+    async getPRState(prNumber, { repo }) {
       return gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state', '--jq', '.state']);
     },
 
-    getPRBranch(prNumber, { repo }) {
+    async getPRBranch(prNumber, { repo }) {
       return gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefName', '--jq', '.headRefName']);
     },
 
-    getPRBody(prNumber, { repo }) {
+    async getPRBody(prNumber, { repo }) {
       return gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'body', '--jq', '.body']);
     },
 
-    updatePRBody(prNumber, { repo, body }) {
-      gh(['pr', 'edit', String(prNumber), '--repo', repo, '--body-file', '-'], { input: body });
+    async updatePRBody(prNumber, { repo, body }) {
+      await gh(['pr', 'edit', String(prNumber), '--repo', repo, '--body-file', '-'], { input: body });
     },
 
-    getPRFiles(prNumber, { repo }) {
-      const out = gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'files', '--jq', '.files']);
+    async getPRFiles(prNumber, { repo }) {
+      const out = await gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'files', '--jq', '.files']);
       try { return JSON.parse(out); } catch { return []; }
     },
 
-    getPRCommits(prNumber, { repo }) {
-      const out = gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'commits', '--jq', '.commits']);
+    async getPRCommits(prNumber, { repo }) {
+      const out = await gh(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'commits', '--jq', '.commits']);
       try { return JSON.parse(out); } catch { return []; }
     },
 
-    getReviews(prNumber, { repo }) {
-      const out = gh(['api', `repos/${repo}/pulls/${prNumber}/reviews`]);
+    async getReviews(prNumber, { repo }) {
+      const out = await gh(['api', `repos/${repo}/pulls/${prNumber}/reviews`]);
       try { return JSON.parse(out); } catch { return []; }
     },
 
-    getReviewComments(prNumber, { repo }) {
-      const out = gh(['api', `repos/${repo}/pulls/${prNumber}/comments`]);
+    async getReviewComments(prNumber, { repo }) {
+      const out = await gh(['api', `repos/${repo}/pulls/${prNumber}/comments`]);
       try { return JSON.parse(out); } catch { return []; }
     },
 
-    submitReview(prNumber, { repo, body, event, comments }) {
+    async submitReview(prNumber, { repo, body, event, comments }) {
       const endpoint = `repos/${repo}/pulls/${prNumber}/reviews`;
       const args = ['api', endpoint, '-X', 'POST', '--input', '-'];
       const env = reviewToken ? { ...process.env, GH_TOKEN: reviewToken } : undefined;
@@ -71,25 +80,25 @@ export function create({ reviewToken } = {}) {
 
       if (comments?.length) {
         try {
-          gh(args, { input: JSON.stringify({ event: effectiveEvent, body: effectiveBody, comments }), env });
+          await gh(args, { input: JSON.stringify({ event: effectiveEvent, body: effectiveBody, comments }), env });
           return;
         } catch (err) {
           if (!err.message?.includes('422')) throw err;
         }
       }
 
-      gh(args, { input: JSON.stringify({ event: effectiveEvent, body: effectiveBody }), env });
+      await gh(args, { input: JSON.stringify({ event: effectiveEvent, body: effectiveBody }), env });
     },
 
-    getPRDiff(prNumber, { repo }) {
+    async getPRDiff(prNumber, { repo }) {
       return gh(['pr', 'diff', String(prNumber), '--repo', repo]);
     },
 
-    dismissReview(prNumber, reviewId, { repo, message }) {
-      gh(['api', `repos/${repo}/pulls/${prNumber}/reviews/${reviewId}/dismissals`, '-X', 'PUT', '-f', `message=${message}`]);
+    async dismissReview(prNumber, reviewId, { repo, message }) {
+      await gh(['api', `repos/${repo}/pulls/${prNumber}/reviews/${reviewId}/dismissals`, '-X', 'PUT', '-f', `message=${message}`]);
     },
 
-    findLinkedPRs({ repo, issueId, branchPattern }) {
+    async findLinkedPRs({ repo, issueId, branchPattern }) {
       const cacheKey = `${repo}:${issueId}`;
       if (prCache.has(cacheKey)) return prCache.get(cacheKey);
 
@@ -97,7 +106,7 @@ export function create({ reviewToken } = {}) {
       const branch = branchPattern || (typeof issueId === 'number' ? `agent/issue-${issueId}` : `agent/${issueId}`);
 
       try {
-        const out = gh(['pr', 'list', '--repo', repo, '--head', branch, '--state', 'open', '--json', 'number', '--jq', '.[].number']);
+        const out = await gh(['pr', 'list', '--repo', repo, '--head', branch, '--state', 'open', '--json', 'number', '--jq', '.[].number']);
         if (out) {
           for (const line of out.split('\n')) {
             const n = parseInt(line, 10);
@@ -108,7 +117,7 @@ export function create({ reviewToken } = {}) {
 
       if (results.length === 0) {
         try {
-          const out = gh(['pr', 'list', '--repo', repo, '--search', `Closes #${issueId}`, '--json', 'number', '--jq', '.[].number']);
+          const out = await gh(['pr', 'list', '--repo', repo, '--search', `Closes #${issueId}`, '--json', 'number', '--jq', '.[].number']);
           if (out) {
             for (const line of out.split('\n')) {
               const n = parseInt(line, 10);
@@ -117,7 +126,7 @@ export function create({ reviewToken } = {}) {
           }
         } catch {}
         try {
-          const out = gh(['pr', 'list', '--repo', repo, '--search', `Part of #${issueId}`, '--json', 'number', '--jq', '.[].number']);
+          const out = await gh(['pr', 'list', '--repo', repo, '--search', `Part of #${issueId}`, '--json', 'number', '--jq', '.[].number']);
           if (out) {
             for (const line of out.split('\n')) {
               const n = parseInt(line, 10);
@@ -131,10 +140,10 @@ export function create({ reviewToken } = {}) {
       return results;
     },
 
-    findAllPRs(issueId, repoNames, { branchPattern } = {}) {
+    async findAllPRs(issueId, repoNames, { branchPattern } = {}) {
       const all = [];
       for (const repo of repoNames) {
-        const prs = this.findLinkedPRs({ repo, issueId, branchPattern });
+        const prs = await this.findLinkedPRs({ repo, issueId, branchPattern });
         for (const prNumber of prs) {
           all.push({ repo, prNumber });
         }
@@ -142,7 +151,7 @@ export function create({ reviewToken } = {}) {
       return all;
     },
 
-    classifyReviewItems(items, repoNames) {
+    async classifyReviewItems(items, repoNames) {
       const needsRevision = [];
       const approved = [];
 
@@ -154,7 +163,7 @@ export function create({ reviewToken } = {}) {
           ? `agent/issue-${issueId}`
           : `agent/${issueId}`;
 
-        const prs = this.findAllPRs(issueId, repoNames, { branchPattern });
+        const prs = await this.findAllPRs(issueId, repoNames, { branchPattern });
         if (prs.length === 0) continue;
 
         item._prs = prs;
@@ -166,7 +175,7 @@ export function create({ reviewToken } = {}) {
 
         for (const { repo, prNumber } of prs) {
           try {
-            const reviews = this.getReviews(prNumber, { repo }) || [];
+            const reviews = await this.getReviews(prNumber, { repo }) || [];
             if (reviews.length === 0) continue;
 
             const actMatch = reviews

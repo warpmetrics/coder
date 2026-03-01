@@ -27,10 +27,12 @@ export function createNotifier(config) {
   });
 
   return {
-    comment(issueId, opts) {
+    async comment(issueId, opts) {
       const formatted = formatBotComment(opts.body, opts.runId);
       for (const ch of channels) {
-        ch.comment(issueId, { ...opts, body: formatted });
+        try {
+          await ch.comment(issueId, { ...opts, body: formatted });
+        } catch {}
       }
     },
   };

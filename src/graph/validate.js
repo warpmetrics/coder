@@ -87,7 +87,7 @@ export function findReachableActs(startAct, graph) {
  * Validate that the graph is internally consistent.
  * Returns { ok, errors, warnings }.
  */
-export function validateGraph(graph, states) {
+export function validateGraph(graph, states, triggers = {}) {
   const errors = [];
   const warnings = [];
 
@@ -175,12 +175,36 @@ export function validateGraph(graph, states) {
     }
   }
 
+  // Trigger validation
+  const validTriggerTypes = new Set(['act', 'global', 'reset']);
+  for (const [name, trigger] of Object.entries(triggers)) {
+    if (!trigger.label || typeof trigger.label !== 'string') {
+      errors.push(`trigger '${name}' missing label`);
+    }
+    if (!validTriggerTypes.has(trigger.type)) {
+      errors.push(`trigger '${name}' has invalid type '${trigger.type}' (expected: ${[...validTriggerTypes].join(', ')})`);
+      continue;
+    }
+    if (trigger.type === 'act') {
+      if (!trigger.act || !(trigger.act in graph)) {
+        errors.push(`trigger '${name}' references unknown act '${trigger.act}'`);
+      } else if (!trigger.result || !graph[trigger.act].results?.[trigger.result]) {
+        errors.push(`trigger '${name}' references unknown result '${trigger.result}' on act '${trigger.act}'`);
+      }
+    }
+    if (trigger.type === 'global') {
+      if (!trigger.outcome || !(trigger.outcome in states)) {
+        errors.push(`trigger '${name}' references unknown outcome '${trigger.outcome}'`);
+      }
+    }
+  }
+
   return { ok: errors.length === 0, errors, warnings };
 }
 
 /**
  * Find outcomes in states that no result edge or phase group produces.
- * These are external-only outcomes (e.g. RESUMED, STARTED, ABORTED).
+ * These are external-only outcomes (e.g. RESUMED, STARTED, CANCELLED).
  */
 export function findOrphanOutcomes(graph, states) {
   const produced = new Set();

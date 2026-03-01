@@ -28,9 +28,11 @@ function buildPlans(actOpts, deployBatch) {
   }];
 }
 
+const DEFAULT_MAX_DEPLOY_RETRIES = 3;
+
 export const definition = {
   name: 'deploy',
-  resultTypes: ['success', 'error'],
+  resultTypes: ['success', 'error', 'max_retries'],
   effects: {
     async success(run, result, ctx) {
       const { config, clients: { warp, board, log } } = ctx;
@@ -70,6 +72,17 @@ export const definition = {
   create() {
     return async (run, ctx) => {
       const { config, clients, context } = ctx;
+      const maxRetries = config.maxDeployRetries || DEFAULT_MAX_DEPLOY_RETRIES;
+      const attempts = context.actOpts?.deployAttempts || 0;
+
+      if (attempts >= maxRetries) {
+        clients.log(`max deploy retries (${maxRetries}) exceeded — giving up`);
+        return {
+          type: 'max_retries', costUsd: null, trace: null,
+          outcomeOpts: { deploy_attempts: String(attempts) },
+        };
+      }
+
       const result = await deploy(context.actOpts, { config, clients, context });
       const batchedIssues = context.deployBatch?.issues?.filter(i => i.issueId !== run.issueId) || [];
       const serializedBatch = batchedIssues.map(i => ({
@@ -84,17 +97,20 @@ export const definition = {
 
       let prs = context.actOpts?.prs || [];
       let release = context.actOpts?.release || [];
-      if (result.type === 'error' && allCompleted.length) {
-        release = release.filter(s => !allCompleted.includes(s.repo));
-        prs = prs.filter(p => !allCompleted.includes(p.repo));
-        clients.log(`retry will only deploy: ${release.map(s => s.repo).join(', ')}`);
+      if (result.type === 'error') {
+        clients.log(`deploy failed: ${result.error}`);
+        if (allCompleted.length) {
+          release = release.filter(s => !allCompleted.includes(s.repo));
+          prs = prs.filter(p => !allCompleted.includes(p.repo));
+          clients.log(`retry will only deploy: ${release.map(s => s.repo).join(', ')}`);
+        }
       }
 
       return {
         ...result,
         costUsd: null, trace: null,
-        outcomeOpts: { stepCount: result.steps?.length },
-        nextActOpts: { prs, release, completedRepos: allCompleted, batchedIssues: serializedBatch },
+        outcomeOpts: { stepCount: result.steps?.length, deploy_attempts: String(attempts + 1) },
+        nextActOpts: { prs, release, completedRepos: allCompleted, batchedIssues: serializedBatch, deployAttempts: attempts + 1 },
         batchedIssues,
       };
     };
@@ -171,7 +187,7 @@ export async function deploy(actOpts, ctx = {}) {
     const dest = join(workdir, short);
     log(`cloning ${step.repo}...`);
     try {
-      git.clone(`git@github.com:${step.repo}.git`, dest);
+      await git.clone(`git@github.com:${step.repo}.git`, dest);
       clonedRepos.set(step.repo, dest);
     } catch (err) {
       cleanup(workdir);

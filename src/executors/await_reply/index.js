@@ -12,7 +12,7 @@ export async function awaitReply(run, ctx) {
   const { clients: { issues, log }, config, context: { actOpts } } = ctx;
   const primaryRepo = config.repoNames[0];
   let comments;
-  try { comments = issues.getIssueComments(run.issueId, { repo: primaryRepo }); } catch { return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: { sessionId: actOpts?.sessionId } }; }
+  try { comments = await issues.getIssueComments(run.issueId, { repo: primaryRepo }); } catch { return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: { sessionId: actOpts?.sessionId } }; }
 
   const lastQuestionIdx = comments.findLastIndex(c => c.body?.includes('<!-- warp-coder:question'));
   if (lastQuestionIdx === -1 || lastQuestionIdx === comments.length - 1) {

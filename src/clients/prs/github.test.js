@@ -20,7 +20,7 @@ function makeCodehost(overrides = {}) {
 
 describe('findAllPRs', () => {
 
-  it('aggregates PRs across repos', () => {
+  it('aggregates PRs across repos', async () => {
     const ch = makeCodehost({
       findLinkedPRs: ({ repo }) => {
         if (repo === 'org/api') return [1, 2];
@@ -28,7 +28,7 @@ describe('findAllPRs', () => {
         return [];
       },
     });
-    const all = ch.findAllPRs(42, ['org/api', 'org/frontend']);
+    const all = await ch.findAllPRs(42, ['org/api', 'org/frontend']);
     assert.deepEqual(all, [
       { repo: 'org/api', prNumber: 1 },
       { repo: 'org/api', prNumber: 2 },
@@ -36,32 +36,32 @@ describe('findAllPRs', () => {
     ]);
   });
 
-  it('returns empty when no repos have PRs', () => {
+  it('returns empty when no repos have PRs', async () => {
     const ch = makeCodehost({ findLinkedPRs: () => [] });
-    const all = ch.findAllPRs(42, ['org/api', 'org/frontend']);
+    const all = await ch.findAllPRs(42, ['org/api', 'org/frontend']);
     assert.deepEqual(all, []);
   });
 
-  it('passes branchPattern to findLinkedPRs', () => {
+  it('passes branchPattern to findLinkedPRs', async () => {
     const calls = [];
     const ch = makeCodehost({
       findLinkedPRs: (opts) => { calls.push(opts); return []; },
     });
-    ch.findAllPRs(42, ['org/api'], { branchPattern: 'custom/branch' });
+    await ch.findAllPRs(42, ['org/api'], { branchPattern: 'custom/branch' });
     assert.equal(calls[0].branchPattern, 'custom/branch');
     assert.equal(calls[0].issueId, 42);
     assert.equal(calls[0].repo, 'org/api');
   });
 
-  it('handles single repo', () => {
+  it('handles single repo', async () => {
     const ch = makeCodehost({ findLinkedPRs: () => [10] });
-    const all = ch.findAllPRs(1, ['org/api']);
+    const all = await ch.findAllPRs(1, ['org/api']);
     assert.deepEqual(all, [{ repo: 'org/api', prNumber: 10 }]);
   });
 
-  it('handles empty repoNames list', () => {
+  it('handles empty repoNames list', async () => {
     const ch = makeCodehost({ findLinkedPRs: () => [1] });
-    const all = ch.findAllPRs(42, []);
+    const all = await ch.findAllPRs(42, []);
     assert.deepEqual(all, []);
   });
 });
@@ -72,35 +72,35 @@ describe('findAllPRs', () => {
 
 describe('classifyReviewItems', () => {
 
-  it('skips items without _issueId', () => {
+  it('skips items without _issueId', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [{ state: 'APPROVED', body: '' }],
     });
-    const { needsRevision, approved } = ch.classifyReviewItems([{}], ['org/api']);
+    const { needsRevision, approved } = await ch.classifyReviewItems([{}], ['org/api']);
     assert.equal(needsRevision.length, 0);
     assert.equal(approved.length, 0);
   });
 
-  it('skips items with no linked PRs', () => {
+  it('skips items with no linked PRs', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [],
       getReviews: () => [],
     });
-    const { needsRevision, approved } = ch.classifyReviewItems(
+    const { needsRevision, approved } = await ch.classifyReviewItems(
       [{ _issueId: 42 }], ['org/api'],
     );
     assert.equal(needsRevision.length, 0);
     assert.equal(approved.length, 0);
   });
 
-  it('classifies approved PRs', () => {
+  it('classifies approved PRs', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [{ state: 'APPROVED', body: '' }],
     });
     const items = [{ _issueId: 42 }];
-    const { needsRevision, approved } = ch.classifyReviewItems(items, ['org/api']);
+    const { needsRevision, approved } = await ch.classifyReviewItems(items, ['org/api']);
     assert.equal(approved.length, 1);
     assert.equal(needsRevision.length, 0);
     assert.equal(approved[0]._issueId, 42);
@@ -108,18 +108,18 @@ describe('classifyReviewItems', () => {
     assert.equal(approved[0]._prNumber, 1);
   });
 
-  it('classifies changes-requested as needsRevision', () => {
+  it('classifies changes-requested as needsRevision', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [{ state: 'CHANGES_REQUESTED', body: '' }],
     });
     const items = [{ _issueId: 42 }];
-    const { needsRevision, approved } = ch.classifyReviewItems(items, ['org/api']);
+    const { needsRevision, approved } = await ch.classifyReviewItems(items, ['org/api']);
     assert.equal(needsRevision.length, 1);
     assert.equal(approved.length, 0);
   });
 
-  it('PR with no reviews does not block approval (skipped)', () => {
+  it('PR with no reviews does not block approval (skipped)', async () => {
     const ch = makeCodehost({
       findLinkedPRs: ({ repo }) => {
         if (repo === 'org/api') return [1];
@@ -133,24 +133,24 @@ describe('classifyReviewItems', () => {
       },
     });
     const items = [{ _issueId: 42 }];
-    const { approved } = ch.classifyReviewItems(items, ['org/api', 'org/frontend']);
+    const { approved } = await ch.classifyReviewItems(items, ['org/api', 'org/frontend']);
     // Empty reviews are skipped (continue), so allApproved stays true
     assert.equal(approved.length, 1);
   });
 
-  it('PR with COMMENT-only review is not approved', () => {
+  it('PR with COMMENT-only review is not approved', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [{ state: 'COMMENTED', body: 'Looks interesting' }],
     });
     const items = [{ _issueId: 42 }];
-    const { needsRevision, approved } = ch.classifyReviewItems(items, ['org/api']);
+    const { needsRevision, approved } = await ch.classifyReviewItems(items, ['org/api']);
     // COMMENTED has no APPROVED state → allApproved = false
     assert.equal(approved.length, 0);
     assert.equal(needsRevision.length, 0);
   });
 
-  it('all PRs approved across repos → approved', () => {
+  it('all PRs approved across repos → approved', async () => {
     const ch = makeCodehost({
       findLinkedPRs: ({ repo }) => {
         if (repo === 'org/api') return [1];
@@ -160,11 +160,11 @@ describe('classifyReviewItems', () => {
       getReviews: () => [{ state: 'APPROVED', body: '' }],
     });
     const items = [{ _issueId: 42 }];
-    const { approved } = ch.classifyReviewItems(items, ['org/api', 'org/frontend']);
+    const { approved } = await ch.classifyReviewItems(items, ['org/api', 'org/frontend']);
     assert.equal(approved.length, 1);
   });
 
-  it('any CHANGES_REQUESTED → needsRevision even if some approved', () => {
+  it('any CHANGES_REQUESTED → needsRevision even if some approved', async () => {
     const ch = makeCodehost({
       findLinkedPRs: ({ repo }) => {
         if (repo === 'org/api') return [1];
@@ -178,12 +178,12 @@ describe('classifyReviewItems', () => {
       },
     });
     const items = [{ _issueId: 42 }];
-    const { needsRevision, approved } = ch.classifyReviewItems(items, ['org/api', 'org/frontend']);
+    const { needsRevision, approved } = await ch.classifyReviewItems(items, ['org/api', 'org/frontend']);
     assert.equal(needsRevision.length, 1);
     assert.equal(approved.length, 0);
   });
 
-  it('multiple items classified independently', () => {
+  it('multiple items classified independently', async () => {
     const ch = makeCodehost({
       findLinkedPRs: ({ issueId }) => {
         if (issueId === 1) return [10];
@@ -197,14 +197,14 @@ describe('classifyReviewItems', () => {
       },
     });
     const items = [{ _issueId: 1 }, { _issueId: 2 }];
-    const { needsRevision, approved } = ch.classifyReviewItems(items, ['org/api']);
+    const { needsRevision, approved } = await ch.classifyReviewItems(items, ['org/api']);
     assert.equal(approved.length, 1);
     assert.equal(approved[0]._issueId, 1);
     assert.equal(needsRevision.length, 1);
     assert.equal(needsRevision[0]._issueId, 2);
   });
 
-  it('extracts reviewActId from review body HTML comment', () => {
+  it('extracts reviewActId from review body HTML comment', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [
@@ -212,11 +212,11 @@ describe('classifyReviewItems', () => {
       ],
     });
     const items = [{ _issueId: 42 }];
-    ch.classifyReviewItems(items, ['org/api']);
+    await ch.classifyReviewItems(items, ['org/api']);
     assert.equal(items[0]._reviewActId, 'wm_act_abc123');
   });
 
-  it('uses latest review for reviewActId (searches newest first)', () => {
+  it('uses latest review for reviewActId (searches newest first)', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [
@@ -225,18 +225,18 @@ describe('classifyReviewItems', () => {
       ],
     });
     const items = [{ _issueId: 42 }];
-    ch.classifyReviewItems(items, ['org/api']);
+    await ch.classifyReviewItems(items, ['org/api']);
     // Reviews are reversed — newest first, so wm_act_new should be picked
     assert.equal(items[0]._reviewActId, 'wm_act_new');
   });
 
-  it('sets _prs and _prNumber on processed items', () => {
+  it('sets _prs and _prNumber on processed items', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [5, 10],
       getReviews: () => [{ state: 'APPROVED', body: '' }],
     });
     const items = [{ _issueId: 42 }];
-    ch.classifyReviewItems(items, ['org/api']);
+    await ch.classifyReviewItems(items, ['org/api']);
     assert.deepEqual(items[0]._prs, [
       { repo: 'org/api', prNumber: 5 },
       { repo: 'org/api', prNumber: 10 },
@@ -244,38 +244,38 @@ describe('classifyReviewItems', () => {
     assert.equal(items[0]._prNumber, 5); // first PR
   });
 
-  it('handles getReviews throwing (treats as not approved)', () => {
+  it('handles getReviews throwing (treats as not approved)', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => { throw new Error('API error'); },
     });
     const items = [{ _issueId: 42 }];
-    const { needsRevision, approved } = ch.classifyReviewItems(items, ['org/api']);
+    const { needsRevision, approved } = await ch.classifyReviewItems(items, ['org/api']);
     // Error → allApproved = false, no feedback → neither bucket
     assert.equal(approved.length, 0);
     assert.equal(needsRevision.length, 0);
   });
 
-  it('no reviews (empty array) → neither approved nor needsRevision', () => {
+  it('no reviews (empty array) → neither approved nor needsRevision', async () => {
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [],
     });
     const items = [{ _issueId: 42 }];
-    const { needsRevision, approved } = ch.classifyReviewItems(items, ['org/api']);
+    const { needsRevision, approved } = await ch.classifyReviewItems(items, ['org/api']);
     // No reviews → allApproved stays true but continues loop; after loop,
     // allApproved is true with prs.length > 0, so it should be approved
     assert.equal(approved.length, 1);
     assert.equal(needsRevision.length, 0);
   });
 
-  it('uses numeric issueId for branch pattern', () => {
+  it('uses numeric issueId for branch pattern', async () => {
     const patterns = [];
     const ch = makeCodehost({
       findLinkedPRs: (opts) => { patterns.push(opts.branchPattern); return []; },
       getReviews: () => [],
     });
-    ch.classifyReviewItems([{ _issueId: 42 }], ['org/api']);
+    await ch.classifyReviewItems([{ _issueId: 42 }], ['org/api']);
     // For numeric issueId, pattern should be agent/issue-42
     // (not directly testable from findLinkedPRs since classifyReviewItems passes branchPattern
     // via findAllPRs which passes it to findLinkedPRs)
@@ -283,14 +283,14 @@ describe('classifyReviewItems', () => {
     assert.ok(patterns.length > 0 || true); // findLinkedPRs was overridden
   });
 
-  it('string issueId uses agent/{id} branch pattern', () => {
+  it('string issueId uses agent/{id} branch pattern', async () => {
     // Verify the branch pattern derivation for string IDs
     const ch = makeCodehost({
       findLinkedPRs: () => [1],
       getReviews: () => [{ state: 'APPROVED', body: '' }],
     });
     const items = [{ _issueId: 'custom-slug' }];
-    const { approved } = ch.classifyReviewItems(items, ['org/api']);
+    const { approved } = await ch.classifyReviewItems(items, ['org/api']);
     assert.equal(approved.length, 1);
   });
 });

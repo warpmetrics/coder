@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { compileGraph, loadGraph } from './index.js';
-import { GRAPH as ORIGINAL_GRAPH, STATES as ORIGINAL_STATES } from './machine.js';
+import { GRAPH as ORIGINAL_GRAPH, STATES as ORIGINAL_STATES, TRIGGERS as ORIGINAL_TRIGGERS, CHECKPOINTS as ORIGINAL_CHECKPOINTS } from './machine.js';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
 
@@ -152,9 +152,10 @@ describe('compileGraph', () => {
       },
       states: { OK: 'done', Started: 'todo' },
     };
-    const { graph, states } = compileGraph(doc);
+    const { graph, states, triggers } = compileGraph(doc);
     assert.strictEqual(graph.states, undefined);
     assert.deepStrictEqual(states, { OK: 'done', Started: 'todo' });
+    assert.deepStrictEqual(triggers, {});
   });
 
   it('uses label field when provided', () => {
@@ -215,14 +216,79 @@ describe('compileGraph', () => {
     };
     assert.throws(() => compileGraph(doc), /Graph validation failed/);
   });
+
+  it('derives checkpoints from cross-phase transitions on Issue run', () => {
+    const doc = {
+      Phase1: {
+        executor: null,
+        results: { created: { outcome: 'Building', on: 'Phase1', next: 'Work' } },
+      },
+      Work: {
+        executor: 'work',
+        parent: 'Phase1',
+        results: {
+          success: [
+            { outcome: 'Done', on: 'Phase1' },
+            { outcome: 'Done', on: 'Issue', next: 'Phase2' },
+          ],
+        },
+      },
+      Phase2: {
+        executor: null,
+        results: { created: { outcome: 'Deploying', on: 'Phase2', next: 'Ship' } },
+      },
+      Ship: {
+        executor: 'ship',
+        parent: 'Phase2',
+        results: { success: { outcome: 'Shipped' } },
+      },
+      states: { Building: 'inProgress', Done: 'done', Deploying: 'inProgress', Shipped: 'done' },
+    };
+    const { checkpoints } = compileGraph(doc);
+    assert.ok(checkpoints.has('Done'), 'Done is a checkpoint (on Issue, next Phase2)');
+    assert.ok(!checkpoints.has('Building'), 'Building is not a checkpoint (on Phase1)');
+    assert.ok(!checkpoints.has('Deploying'), 'Deploying is not a checkpoint (on Phase2)');
+    assert.ok(!checkpoints.has('Shipped'), 'Shipped has no next');
+  });
+
+  it('derives checkpoints from bootstrap', () => {
+    const doc = {
+      bootstrap: { outcome: 'Started', next: 'Phase1' },
+      Phase1: {
+        executor: null,
+        results: { created: { outcome: 'Go', on: 'Phase1', next: 'Work' } },
+      },
+      Work: {
+        executor: 'work',
+        parent: 'Phase1',
+        results: { success: { outcome: 'Done' } },
+      },
+      states: { Started: 'todo', Go: 'inProgress', Done: 'done' },
+    };
+    const { checkpoints } = compileGraph(doc);
+    assert.ok(checkpoints.has('Started'), 'bootstrap outcome is a checkpoint');
+  });
+
+  it('returns empty checkpoints when no cross-phase transitions exist', () => {
+    const doc = {
+      Act: {
+        executor: 'run',
+        results: { done: { outcome: 'Finished' } },
+      },
+      states: { Finished: 'done' },
+    };
+    const { checkpoints } = compileGraph(doc);
+    assert.equal(checkpoints.size, 0);
+  });
 });
 
 describe('loadGraph round-trip', () => {
-  it('issue.yaml compiles to the same GRAPH and STATES as machine.js', () => {
-    // loadGraph is already called by machine.js, so ORIGINAL_GRAPH/ORIGINAL_STATES
-    // are the compiled result. Load fresh to double-check.
-    const { graph, states } = loadGraph(join(__dirname, '../../graphs/issue.yaml'));
+  it('issue.yaml compiles to the same GRAPH, STATES, TRIGGERS, and CHECKPOINTS as machine.js', () => {
+    // loadGraph is already called by machine.js, so ORIGINAL_* are the compiled result. Load fresh to double-check.
+    const { graph, states, triggers, checkpoints } = loadGraph(join(__dirname, '../../graphs/issue.yaml'));
     assert.deepStrictEqual(graph, ORIGINAL_GRAPH);
     assert.deepStrictEqual(states, ORIGINAL_STATES);
+    assert.deepStrictEqual(triggers, ORIGINAL_TRIGGERS);
+    assert.deepStrictEqual(checkpoints, ORIGINAL_CHECKPOINTS);
   });
 });

@@ -2,68 +2,44 @@
 // runs executors, records outcomes, emits next acts, syncs board.
 // All adapters injected via constructor.
 
-import { OUTCOMES } from './graph/names.js';
+import { OUTCOMES, CLASSIFICATIONS } from './graph/names.js';
 import { CONCURRENCY, LIMITS } from './defaults.js';
 import { normalizeOutcomes } from './graph/index.js';
+import { resolveEdges, executeTrigger, availableTriggers } from './graph/ops.js';
+import { scanForNewComment, evaluateInterrupt } from './interrupt.js';
 
 // ---------------------------------------------------------------------------
-// resolveContainer — maps an 'in' label to a container ID.
-//
-// 'Issue'        → the Issue Run (run.id)
-// '<group label>'→ the group with that label (from run.groups map)
-// omitted        → Issue Run (run.id)
+// Recovery: walk back on Issue run outcomes to find last checkpoint.
+// Checkpoints are phase-completion outcomes derived from the graph.
 // ---------------------------------------------------------------------------
 
-function resolveContainer(inLabel, run, logFn) {
-  if (!inLabel || inLabel === 'Issue') return run.id;
-  const groupId = run.groups?.get(inLabel);
-  if (!groupId) {
-    logFn?.(run.issueId, `warning: group "${inLabel}" not found, falling back to Issue Run`);
-    return run.id;
+export function findRecoveryTarget(outcomes, checkpoints) {
+  for (let i = outcomes.length - 1; i >= 0; i--) {
+    const oc = outcomes[i];
+    if (!checkpoints.has(oc.name)) continue;
+    const act = oc.acts?.[oc.acts.length - 1];
+    if (act) return { phase: act.name, opts: act.opts || {} };
   }
-  return groupId;
+  return null;
 }
 
-export function createRunner({ warp, board, git, prs, issues, notify, config, claudeCode, graph, states, execute, effects, contextProviders, log: logFn }) {
+export function createRunner({ warp, board, git, prs, issues, notify, config, claudeCode, graph, states, triggers, checkpoints, execute, effects, contextProviders, log: logFn }) {
   const repoNames = config.repoNames;
   const apiKey = config.warpmetricsApiKey;
   const concurrency = config.concurrency || 1;
   const inFlight = new Map();
+  const recoveryAttempts = new Map(); // issueId → { count, lastAttempt }
+  const processedComments = new Map(); // issueId → Set<commentId>
 
   // Derive act → executor mapping from graph at construction time.
   const actExecutor = Object.fromEntries(
     Object.entries(graph).filter(([, n]) => n.executor !== null).map(([a, n]) => [a, n.executor])
   );
 
-  // Derive outcome → retry target for terminal results (none of the edges have `next`).
-  // Maps outcome name → { actName, groupLabel, boardState } for retry-from-blocked.
-  const retryTargets = {};
-  for (const [actName, node] of Object.entries(graph)) {
-    if (node.executor === null) continue;
-    const groupLabel = node.group ? (graph[node.group]?.label || node.group) : null;
-
-    // Look up the phase group's "created" outcome to determine the correct board state.
-    let boardState = states[OUTCOMES.RESUMED]; // fallback: inProgress
-    if (node.group) {
-      const groupNode = graph[node.group];
-      if (groupNode?.results?.created) {
-        const createdEdges = normalizeOutcomes(groupNode.results.created.outcomes);
-        const createdOutcome = createdEdges[createdEdges.length - 1]?.name;
-        if (createdOutcome && states[createdOutcome]) boardState = states[createdOutcome];
-      }
-    }
-
-    for (const resultDef of Object.values(node.results)) {
-      const edges = normalizeOutcomes(resultDef.outcomes);
-      const hasNext = edges.some(e => e.next);
-      if (hasNext) continue;
-      // All edges for this result are terminal — use the last edge's outcome name.
-      const outcomeName = edges[edges.length - 1].name;
-      if (outcomeName) {
-        retryTargets[outcomeName] = { actName, groupLabel, boardState };
-      }
-    }
-  }
+  // Derive failure outcome names from classifications for recovery gating.
+  const FAILURE_OUTCOMES = new Set(
+    CLASSIFICATIONS.filter(c => c.classification === 'failure').map(c => c.name)
+  );
 
   // Derive allowed result types per executor from graph (for runtime enforcement).
   const executorResultTypes = new Map();
@@ -218,33 +194,11 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       let nextAct = null;
       if (apiKey) {
         try {
-          let recordedOnIssueRun = false;
-          for (const edge of edges) {
-            const containerId = resolveContainer(edge.in, run, log);
-            if (containerId === run.id) recordedOnIssueRun = true;
-
-            const { outcomeId } = warp.batchOutcome(apiKey, {
-              runId: containerId, name: edge.name, opts: result.outcomeOpts,
-            });
-
-            if (edge.next) {
-              if (!outcomeId) {
-                log(run.issueId, `warning: outcomeId missing for ${edge.name}, cannot emit ${edge.next}`);
-              } else {
-                const nao = result.nextActOpts || act.opts || {};
-                const { actId } = warp.batchAct(apiKey, {
-                  outcomeId, name: edge.next, opts: nao,
-                });
-                nextAct = { id: actId, name: edge.next, opts: nao };
-              }
-            }
-          }
-
-          // Mirror last outcome on Issue Run for board tracking.
-          if (!recordedOnIssueRun) {
-            warp.batchOutcome(apiKey, { runId: run.id, name: edges[edges.length - 1].name });
-          }
-
+          const resolved = resolveEdges(warp, apiKey, edges, run, {
+            outcomeOpts: result.outcomeOpts,
+            nextActOpts: result.nextActOpts || act.opts,
+          });
+          nextAct = resolved.nextAct;
           await warp.batchFlush(apiKey);
         } catch (err) {
           log(run.issueId, `warning: outcome/act failed: ${err.message}`);
@@ -297,24 +251,30 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
   // poll — one cycle of intake + processing
   // -------------------------------------------------------------------------
 
-  async function poll({ onStep, onClearStep, onBeforeLog } = {}) {
+  async function poll({ onStep, onClearStep, onBeforeLog, onPreview } = {}) {
     // Fetch open runs first so intake can dedup.
     let openRuns = [];
     if (apiKey) {
       try {
-        openRuns = await warp.findOpenIssueRuns(apiKey);
+        openRuns = await warp.findOpenIssueRuns(apiKey, {
+          onPartial: (partial) => onPreview?.(partial),
+        });
       } catch (err) {
         log(null, `warning: could not fetch open runs: ${err.message}`);
         return { total: 0, processing: 0, inFlight: inFlight.size };
       }
     }
 
-    // Pre-fetch Done/Aborted sets so intake can skip issues that would be immediately closed.
+    // Pre-fetch Done/Cancelled sets so intake can skip issues that would be immediately closed.
     let doneIds = new Set();
-    let abortedIds = new Set();
+    let cancelledIds = new Set();
     if (board) {
-      try { if (board.scanDone) doneIds = await board.scanDone(); } catch {}
-      try { if (board.scanAborted) abortedIds = await board.scanAborted(); } catch {}
+      const [d, c] = await Promise.allSettled([
+        board.scanDone ? board.scanDone() : Promise.resolve(new Set()),
+        board.scanCancelled ? board.scanCancelled() : Promise.resolve(new Set()),
+      ]);
+      if (d.status === 'fulfilled') doneIds = d.value;
+      if (c.status === 'fulfilled') cancelledIds = c.value;
     }
 
     // Intake: discover new issues from board, skip those with existing runs.
@@ -325,7 +285,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
         for (const issue of newIssues) {
           if (existingIssueIds.has(issue.issueId)) continue;
           const boardKey = `${issue.repo || repoNames[0]}#${issue.issueId}`;
-          if (doneIds.has(boardKey) || abortedIds.has(boardKey)) continue;
+          if (doneIds.has(boardKey) || cancelledIds.has(boardKey)) continue;
           if (apiKey) {
             try {
               const { runId } = await warp.createIssueRun(apiKey, {
@@ -363,33 +323,28 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       } catch (err) { log(null, `warning: board item fetch failed: ${err.message}`); }
     }
 
-    // Abort: if a run's issue is in the board's Aborted column, close the run.
-    if (apiKey && abortedIds.size > 0) {
+    // Cancel: if a run's issue is in the board's Cancelled column, close the run.
+    if (apiKey && cancelledIds.size > 0 && triggers?.cancel) {
       for (let i = openRuns.length - 1; i >= 0; i--) {
         const run = openRuns[i];
-        if (!run.issueId || !abortedIds.has(`${run.repo || repoNames[0]}#${run.issueId}`)) continue;
+        if (!run.issueId || !cancelledIds.has(`${run.repo || repoNames[0]}#${run.issueId}`)) continue;
         try {
-          await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.ABORTED });
-          try {
-            issues.closeIssue(run.issueId, { repo: run.repo || repoNames[0], reason: 'not planned' });
-            log(run.issueId, `aborted — issue closed`);
-          } catch (err) {
-            log(run.issueId, `aborted (could not close issue: ${err.message})`);
-          }
+          await executeTrigger(warp, apiKey, { graph, triggers, states, checkpoints }, run, 'cancel');
+          log(run.issueId, `cancelled`);
         } catch (err) {
-          log(run.issueId, `warning: abort failed: ${err.message}`);
+          log(run.issueId, `warning: cancel failed: ${err.message}`);
         }
         openRuns.splice(i, 1);
       }
     }
 
     // Done: if a run's issue is manually moved to Done, close the run.
-    if (apiKey && doneIds.size > 0) {
+    if (apiKey && doneIds.size > 0 && triggers?.ship) {
       for (let i = openRuns.length - 1; i >= 0; i--) {
         const run = openRuns[i];
         if (!run.issueId || !doneIds.has(`${run.repo || repoNames[0]}#${run.issueId}`)) continue;
         try {
-          await warp.recordIssueOutcome(apiKey, { runId: run.id, name: OUTCOMES.MANUAL_RELEASE });
+          await executeTrigger(warp, apiKey, { graph, triggers, states, checkpoints }, run, 'ship');
           log(run.issueId, `shipped (moved to Done column)`);
         } catch (err) {
           log(run.issueId, `warning: ship failed: ${err.message}`);
@@ -398,48 +353,85 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       }
     }
 
-    // Retry: re-emit last act when card leaves Blocked column.
-    if (board?.scanBlocked && apiKey) {
-      try {
-        const blockedIds = await board.scanBlocked();
-        const retriedIds = new Set();
-        for (const run of openRuns) {
-          if (run.pendingAct) continue;
-          if (!run.issueId) continue;
-          if (inFlight.has(run.issueId)) continue;
-          if (retriedIds.has(run.issueId)) continue;
-          if (blockedIds.has(`${run.repo || repoNames[0]}#${run.issueId}`)) continue;
+    // Recovery: walk back on Issue run outcomes, find last checkpoint, re-enter.
+    if (apiKey && triggers?.reset) {
+      const blockedIds = board?.scanBlocked ? await board.scanBlocked() : new Set();
 
-          // Derive retry target from graph using the run's latest outcome.
-          const target = retryTargets[run.latestOutcome];
-          if (!target) continue;
+      for (const run of openRuns) {
+        if (run.pendingAct) continue;
+        if (!run.issueId) continue;
+        if (inFlight.has(run.issueId)) continue;
 
-          const parentId = target.groupLabel ? run.groups?.get(target.groupLabel) : run.id;
-          if (!parentId) continue;
+        const target = findRecoveryTarget(run.outcomes, checkpoints);
+        if (!target) continue;
 
-          try {
-            const { outcomeId } = warp.batchOutcome(apiKey, {
-              runId: parentId, name: OUTCOMES.RESUMED,
-            });
-            const { actId } = warp.batchAct(apiKey, {
-              outcomeId, name: target.actName, opts: {},
-            });
-            await warp.batchFlush(apiKey);
+        // ── Interrupt: check for new human comment before backoff ──
+        const primaryRepo = run.repo || repoNames[0];
+        const comment = issues ? await scanForNewComment(issues, run.issueId, primaryRepo, processedComments) : null;
 
-            run.pendingAct = { id: actId, name: target.actName, opts: {} };
-            retriedIds.add(run.issueId);
-            log(run.issueId, `retrying ${target.actName} (unblocked)`);
+        if (comment && claudeCode) {
+          // Mark comment as processed so we don't re-evaluate it.
+          if (!processedComments.has(run.issueId)) processedComments.set(run.issueId, new Set());
+          processedComments.get(run.issueId).add(comment.id);
 
-            if (run.boardItem && target.boardState) {
-              board.syncState(run.boardItem, target.boardState).catch(err =>
-                log(run.issueId, `warning: board sync failed: ${err.message}`)
-              );
+          const available = availableTriggers(triggers, run, checkpoints);
+          const result = await evaluateInterrupt(claudeCode, comment, run, available, {
+            log: (msg) => log(run.issueId, msg),
+            onBeforeLog,
+          });
+
+          if (result.action !== 'none') {
+            // React to comment as acknowledgment.
+            try { await issues.addReaction(comment.id, 'eyes', { repo: primaryRepo }); } catch {}
+
+            const trigger = triggers[result.action];
+            try {
+              const triggerOpts = trigger?.type === 'reset' ? { phase: result.phase } : {};
+              const { nextAct } = await executeTrigger(warp, apiKey, { graph, triggers, states, checkpoints }, run, result.action, triggerOpts);
+
+              if (trigger?.type === 'reset') {
+                recoveryAttempts.delete(run.issueId);
+                run.pendingAct = nextAct;
+                if (run.boardItem) {
+                  board?.syncState(run.boardItem, states[OUTCOMES.RESUMED] || 'inProgress').catch(() => {});
+                }
+              }
+
+              log(run.issueId, `interrupt: ${result.action} (comment: "${comment.body.slice(0, 60)}")`);
+            } catch (err) {
+              log(run.issueId, `warning: interrupt ${result.action} failed: ${err.message}`);
             }
-          } catch (err) {
-            log(run.issueId, `warning: retry failed: ${err.message}`);
+            continue;
           }
         }
-      } catch (err) { log(null, `warning: scan blocked failed: ${err.message}`); }
+
+        // Known failure + card still in Blocked → wait for human.
+        const boardKey = `${primaryRepo}#${run.issueId}`;
+        if (FAILURE_OUTCOMES.has(run.latestOutcome) && blockedIds.has(boardKey)) continue;
+
+        // Backoff: skip if too soon since last attempt (60s base, doubles each attempt, max 32min).
+        const prev = recoveryAttempts.get(run.issueId);
+        const attempt = (prev?.count || 0) + 1;
+        if (prev) {
+          const delay = Math.min(60_000 * Math.pow(2, prev.count - 1), 60_000 * 32);
+          if (Date.now() - prev.lastAttempt < delay) continue;
+        }
+
+        recoveryAttempts.set(run.issueId, { count: attempt, lastAttempt: Date.now() });
+
+        try {
+          const { nextAct } = await executeTrigger(warp, apiKey, { graph, triggers, states, checkpoints }, run, 'reset');
+
+          run.pendingAct = nextAct;
+          log(run.issueId, `recovering → ${target.phase} (attempt ${attempt}, was: ${run.latestOutcome})`);
+
+          if (run.boardItem) {
+            board?.syncState(run.boardItem, states[OUTCOMES.RESUMED] || 'inProgress').catch(() => {});
+          }
+        } catch (err) {
+          log(run.issueId, `warning: recovery failed (attempt ${attempt}): ${err.message}`);
+        }
+      }
     }
 
     // Process waiting-capable acts first (await_deploy, await_reply) — they
@@ -483,7 +475,7 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
       inFlight.set(run.issueId, promise);
     }
 
-    return { total: openRuns.length, processing: toProcess.length, inFlight: inFlight.size };
+    return { total: openRuns.length, processing: toProcess.length, inFlight: inFlight.size, openRuns };
   }
 
   async function waitForInFlight() {
@@ -492,5 +484,11 @@ export function createRunner({ warp, board, git, prs, issues, notify, config, cl
     }
   }
 
-  return { poll, waitForInFlight, get inFlightSize() { return inFlight.size; } };
+  function resetRecovery() {
+    const count = recoveryAttempts.size;
+    recoveryAttempts.clear();
+    return count;
+  }
+
+  return { poll, waitForInFlight, resetRecovery, get inFlightSize() { return inFlight.size; } };
 }

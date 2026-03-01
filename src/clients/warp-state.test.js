@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { TERMINAL_OUTCOMES, generateId, findPendingAct, findLastExecutedAct } from './warp.js';
+import { TERMINAL_OUTCOMES, generateId, findPendingAct } from './warp.js';
 import { OUTCOMES } from '../graph/names.js';
 
 // ---------------------------------------------------------------------------
@@ -17,7 +17,7 @@ describe('TERMINAL_OUTCOMES', () => {
     const expected = [
       OUTCOMES.MANUAL_RELEASE,
       OUTCOMES.RELEASED,
-      OUTCOMES.ABORTED,
+      OUTCOMES.CANCELLED,
     ];
     for (const name of expected) {
       assert.ok(TERMINAL_OUTCOMES.has(name), `should contain "${name}"`);
@@ -275,104 +275,3 @@ describe('findPendingAct', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// findLastExecutedAct
-// ---------------------------------------------------------------------------
-
-describe('findLastExecutedAct', () => {
-
-  it('returns null for empty data', () => {
-    assert.equal(findLastExecutedAct({}), null);
-    assert.equal(findLastExecutedAct({ groups: [] }), null);
-  });
-
-  it('returns null when no acts have followUpRuns', () => {
-    const data = {
-      groups: [
-        { id: 'grp-1', label: 'Build', outcomes: [{ name: 'Building', acts: [{ id: 'act-1' }] }] },
-      ],
-    };
-    assert.equal(findLastExecutedAct(data), null);
-  });
-
-  it('returns null when acts have empty followUpRuns', () => {
-    const data = {
-      groups: [
-        { id: 'grp-1', label: 'Build', outcomes: [{ name: 'Building', acts: [{ id: 'act-1', followUpRuns: [] }] }] },
-      ],
-    };
-    assert.equal(findLastExecutedAct(data), null);
-  });
-
-  it('finds act with followUpRuns on a group', () => {
-    const data = {
-      groups: [
-        {
-          id: 'grp-1', label: 'Build',
-          outcomes: [{ name: 'Failed', acts: [{ id: 'act-1', name: 'Implement', opts: { repo: 'org/api' }, followUpRuns: [{ id: 'r-1' }] }] }],
-        },
-      ],
-    };
-    const result = findLastExecutedAct(data);
-    assert.ok(result);
-    assert.equal(result.act.id, 'act-1');
-    assert.equal(result.act.name, 'Implement');
-    assert.equal(result.parentId, 'grp-1');
-    assert.equal(result.parentLabel, 'Build');
-  });
-
-  it('uses newest group first', () => {
-    const data = {
-      groups: [
-        { id: 'grp-1', label: 'Build', outcomes: [{ name: 'X', acts: [{ id: 'act-1', followUpRuns: [{ id: 'r-1' }] }] }] },
-        { id: 'grp-2', label: 'Review', outcomes: [{ name: 'Y', acts: [{ id: 'act-2', followUpRuns: [{ id: 'r-2' }] }] }] },
-      ],
-    };
-    const result = findLastExecutedAct(data);
-    assert.ok(result);
-    assert.equal(result.parentId, 'grp-2');
-    assert.equal(result.act.id, 'act-2');
-  });
-
-  it('uses newest outcome within a group', () => {
-    const data = {
-      groups: [
-        {
-          id: 'grp-1', label: 'Build',
-          outcomes: [
-            { name: 'First', acts: [{ id: 'act-1', followUpRuns: [{ id: 'r-1' }] }] },
-            { name: 'Second', acts: [{ id: 'act-2', followUpRuns: [{ id: 'r-2' }] }] },
-          ],
-        },
-      ],
-    };
-    const result = findLastExecutedAct(data);
-    assert.ok(result);
-    assert.equal(result.act.id, 'act-2');
-  });
-
-  it('skips outcomes without acts', () => {
-    const data = {
-      groups: [
-        {
-          id: 'grp-1', label: 'Build',
-          outcomes: [
-            { name: 'First', acts: [{ id: 'act-1', followUpRuns: [{ id: 'r-1' }] }] },
-            { name: 'NoActs' },
-          ],
-        },
-      ],
-    };
-    const result = findLastExecutedAct(data);
-    assert.ok(result);
-    assert.equal(result.act.id, 'act-1');
-  });
-
-  it('only looks at groups, not run-level outcomes', () => {
-    const data = {
-      outcomes: [{ name: 'Started', acts: [{ id: 'act-run', followUpRuns: [{ id: 'r-1' }] }] }],
-      groups: [],
-    };
-    assert.equal(findLastExecutedAct(data), null);
-  });
-});

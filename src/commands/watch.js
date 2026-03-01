@@ -1,7 +1,9 @@
-// CLI entry: spinner UI + adapter wiring + poll loop.
+// CLI entry: TUI (Ink) when TTY, plain log output when piped.
 // All orchestration logic lives in runner.js + machine.js.
 
 import { join } from 'path';
+import { createElement } from 'react';
+import { render } from 'ink';
 import { LIMITS } from '../defaults.js';
 import { loadConfig, repoName, CONFIG_DIR } from '../config.js';
 import { createBoard } from '../clients/boards/index.js';
@@ -17,13 +19,15 @@ import { createClaudeCodeClient } from '../clients/claude-code.js';
 import { ACTS } from '../graph/names.js';
 import { createRunner } from '../runner.js';
 import { listSkills } from '../agent/skills.js';
+import { App } from '../tui/app.js';
 
-// --- Spinner (status line) ---
+const isTTY = process.stderr.isTTY;
+
+// --- Plain-text fallback (non-TTY) ---
 const SPINNER = ['\u28CB', '\u28D9', '\u28F9', '\u28F8', '\u28FC', '\u28F4', '\u28E6', '\u28E7', '\u28C7', '\u28CF'];
 const statusTasks = new Map();
 let spinnerIdx = 0;
 let spinnerTimer = null;
-const isTTY = process.stderr.isTTY;
 
 function clearStatus() { if (isTTY) process.stderr.write('\x1b[2K\r'); }
 function renderStatus() {
@@ -53,7 +57,7 @@ function createBoardAdapter(board, repoNames) {
       }));
     },
     async syncState(item, column) {
-      const methods = { todo: 'moveToTodo', inProgress: 'moveToInProgress', inReview: 'moveToReview', readyForDeploy: 'moveToReadyForDeploy', deploy: 'moveToDeploy', blocked: 'moveToBlocked', waiting: 'moveToWaiting', done: 'moveToDone' };
+      const methods = { todo: 'moveToTodo', inProgress: 'moveToInProgress', inReview: 'moveToReview', readyForDeploy: 'moveToReadyForDeploy', deploy: 'moveToDeploy', blocked: 'moveToBlocked', waiting: 'moveToWaiting', done: 'moveToDone', cancelled: 'moveToCancelled' };
       const method = methods[column];
       if (method && board[method]) await board[method](item);
     },
@@ -65,9 +69,9 @@ function createBoardAdapter(board, repoNames) {
       }
       return all;
     },
-    async scanAborted() {
+    async scanCancelled() {
       try {
-        const items = board.listAborted ? await board.listAborted() : [];
+        const items = board.listCancelled ? await board.listCancelled() : [];
         return new Set(items.filter(i => i._issueId).map(i => `${i.content?.repository || repoNames[0]}#${i._issueId}`));
       } catch { return new Set(); }
     },
@@ -140,6 +144,8 @@ async function loadWorkflow(config) {
       executorDefs: builtins.executorDefs,
       effects: builtins.effects,
       states: builtins.states,
+      triggers: builtins.triggers,
+      checkpoints: builtins.checkpoints,
     };
   }
   const mod = await import(join(process.cwd(), CONFIG_DIR, config.workflow));
@@ -170,19 +176,15 @@ async function loadWorkflow(config) {
 
 // --- Main ---
 
-export async function watch() {
-  const config = loadConfig();
+function createRunnerWithDeps(config, wf, { logFn }) {
   const rawBoard = createBoard(config);
   const prs = createPRClient(config);
   const issues = createIssueClient(config);
   const notify = createNotifier(config);
   const git = createGitClient({ token: config.githubToken });
   const repoNames = config.repos.map(r => repoName(r));
-  const pollInterval = (config.pollInterval || LIMITS.POLL_INTERVAL) * 1000;
   const apiKey = config.warpmetricsApiKey;
-
   const boardAdapter = createBoardAdapter(rawBoard, repoNames);
-  const wf = await loadWorkflow(config);
   const fullConfig = { ...config, repoNames, warpmetricsApiKey: apiKey };
   const claudeCode = createClaudeCodeClient({ warp, apiKey, config: fullConfig });
 
@@ -194,6 +196,8 @@ export async function watch() {
     config: fullConfig,
     graph: wf.graph,
     states: wf.states,
+    triggers: wf.triggers,
+    checkpoints: wf.checkpoints,
     execute: wf.executors,
     effects: wf.effects,
     contextProviders: {
@@ -212,12 +216,94 @@ export async function watch() {
         return { deployBatch: computeDeployBatch(run.issueId, awaiting) };
       },
     },
-    log: (issueId, msg) => {
-      clearStatus();
-      const prefix = issueId ? `[#${issueId}]` : '';
-      process.stderr.write(`[${new Date().toISOString()}] ${prefix}${prefix ? ' ' : ''}${msg}\n`);
-    },
+    log: logFn,
   });
+
+  return { runner, prs, repoNames };
+}
+
+// --- TUI mode (TTY) ---
+
+async function watchTUI(config, wf) {
+  const repoNames = config.repos.map(r => repoName(r));
+  const pollInterval = (config.pollInterval || LIMITS.POLL_INTERVAL) * 1000;
+  const workflowLabel = config.workflow ? `custom (${config.workflow})` : 'default';
+  const concurrency = config.concurrency || 1;
+
+  // We need a log dispatcher that the TUI's App component can provide.
+  // Since the runner is created before Ink renders, we use a mutable ref.
+  let tuiLogFn = (issueId, msg) => {
+    // Fallback before TUI mounts — write to stderr.
+    const prefix = issueId ? `[#${issueId}]` : '';
+    process.stderr.write(`[${new Date().toISOString()}] ${prefix}${prefix ? ' ' : ''}${msg}\n`);
+  };
+
+  const { runner, prs } = createRunnerWithDeps(
+    { ...config, repoNames, warpmetricsApiKey: config.warpmetricsApiKey },
+    wf,
+    { logFn: (issueId, msg) => tuiLogFn(issueId, msg) },
+  );
+
+  // Ensure stdin is in raw mode so characters don't echo to terminal.
+  if (process.stdin.isTTY && process.stdin.setRawMode) {
+    process.stdin.setRawMode(true);
+  }
+  process.stdin.resume();
+
+  const { waitUntilExit, unmount } = render(
+    createElement(App, {
+      runner,
+      prs,
+      graph: wf.graph,
+      repoNames,
+      workflowLabel,
+      concurrency,
+      pollInterval,
+      onLogMount: (fn) => { tuiLogFn = fn; },
+    }),
+    {
+      stdin: process.stdin,
+      stdout: process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+      incrementalRendering: true,
+      maxFps: 30,
+    },
+  );
+
+  await waitUntilExit();
+  // Restore terminal state.
+  if (process.stdin.isTTY && process.stdin.setRawMode) {
+    process.stdin.setRawMode(false);
+  }
+  process.stdin.pause();
+  // Restore log to stderr for any in-flight task output after TUI exits.
+  tuiLogFn = (issueId, msg) => {
+    const prefix = issueId ? `[#${issueId}]` : '';
+    process.stderr.write(`[${new Date().toISOString()}] ${prefix}${prefix ? ' ' : ''}${msg}\n`);
+  };
+  await runner.waitForInFlight();
+  unmount();
+}
+
+// --- Plain mode (non-TTY) ---
+
+async function watchPlain(config, wf) {
+  const repoNames = config.repos.map(r => repoName(r));
+  const pollInterval = (config.pollInterval || LIMITS.POLL_INTERVAL) * 1000;
+  const workflowLabel = config.workflow ? `custom (${config.workflow})` : 'default';
+
+  const { runner, prs } = createRunnerWithDeps(
+    { ...config, repoNames, warpmetricsApiKey: config.warpmetricsApiKey },
+    wf,
+    {
+      logFn: (issueId, msg) => {
+        clearStatus();
+        const prefix = issueId ? `[#${issueId}]` : '';
+        process.stderr.write(`[${new Date().toISOString()}] ${prefix}${prefix ? ' ' : ''}${msg}\n`);
+      },
+    },
+  );
 
   let running = true;
   let sleepResolve = null;
@@ -233,7 +319,6 @@ export async function watch() {
 
   startStatus();
 
-  const workflowLabel = config.workflow ? `custom (${config.workflow})` : 'default';
   console.log(`[${new Date().toISOString()}] warp-coder watching...`);
   console.log(`  board: ${config.board.provider}${config.board.project ? ` (project ${config.board.project})` : ''}`);
   console.log(`  repos: ${repoNames.join(', ')}`);
@@ -271,4 +356,15 @@ export async function watch() {
   await runner.waitForInFlight();
   stopStatus();
   console.log(`[${new Date().toISOString()}] Stopped.`);
+}
+
+export async function watch() {
+  const config = loadConfig();
+  const wf = await loadWorkflow(config);
+
+  if (isTTY) {
+    await watchTUI(config, wf);
+  } else {
+    await watchPlain(config, wf);
+  }
 }

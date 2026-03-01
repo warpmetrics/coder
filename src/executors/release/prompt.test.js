@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PUBLIC_CHANGELOG,
+  publicChangelog,
   PRIVATE_CHANGELOG,
   ChangelogEntrySchema,
   CHANGELOG_ENTRY_SCHEMA,
@@ -16,7 +17,18 @@ describe('changelog prompts', () => {
   it('PUBLIC_CHANGELOG is non-empty', () => {
     assert.ok(typeof PUBLIC_CHANGELOG === 'string');
     assert.ok(PUBLIC_CHANGELOG.length > 50);
-    assert.ok(PUBLIC_CHANGELOG.includes('public'));
+    assert.ok(PUBLIC_CHANGELOG.includes('end users'));
+  });
+
+  it('publicChangelog includes product name when provided', () => {
+    const prompt = publicChangelog('Acme');
+    assert.ok(prompt.includes('end users of Acme'));
+  });
+
+  it('publicChangelog uses generic wording without product name', () => {
+    const prompt = publicChangelog();
+    assert.ok(prompt.includes('end users'));
+    assert.ok(!prompt.includes('end users of'));
   });
 
   it('PRIVATE_CHANGELOG is non-empty', () => {

@@ -1,3 +1,39 @@
+# ── Bootstrap ─────────────────────────────────────────────────
+# Initial outcome emitted when a run is created (before the graph takes over).
+
+bootstrap:
+  outcome: Started
+  next: Build
+
+# ── Triggers ──────────────────────────────────────────────────
+
+triggers:
+  deploy:
+    type: act
+    act: Await Deploy
+    result: approved
+    label: Approve Deploy
+
+  reply:
+    type: act
+    act: Await Reply
+    result: replied
+    label: Mark Replied
+
+  cancel:
+    type: global
+    outcome: Cancelled
+    label: Cancel
+
+  ship:
+    type: global
+    outcome: Manual Release
+    label: Ship
+
+  reset:
+    type: reset
+    label: Reset to Checkpoint
+
 # ── Phase: Build ──────────────────────────────────────────────
 
 Build:
@@ -133,6 +169,9 @@ Run Deploy:
       outcome: Deploy Failed
       on: Deploy
       next: Await Deploy
+    max_retries:
+      outcome: Max Retries
+      on: Deploy
 
 # ── Phase: Release ────────────────────────────────────────────
 
@@ -164,7 +203,7 @@ states:
   Started: todo
   Resumed: inProgress
   Manual Release: done
-  Aborted: blocked
+  Cancelled: cancelled
   Building: inProgress
   Reviewing: inReview
   Releasing: deploy

@@ -4,7 +4,7 @@
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { mkdirSync, rmSync, existsSync } from 'fs';
-import { repoName, deriveRepoDirNames, CONFIG_DIR } from '../../config.js';
+import { repoName, deriveRepoDirNames, issueBranch, CONFIG_DIR } from '../../config.js';
 import { TIMEOUTS } from '../../defaults.js';
 import { fetchComments } from '../../clients/claude-code.js';
 import * as warp from '../../clients/warp.js';
@@ -21,9 +21,16 @@ import { gitExclude } from '../../agent/workspace.js';
 // Small helpers
 // ---------------------------------------------------------------------------
 
-async function classifyIntent(claudeCode, message, log) {
+async function classifyIntent(claudeCode, message, { log, logPrefix, onBeforeLog }) {
+  const start = Date.now();
+  log(`  classifyIntent: starting...`);
   try {
-    const res = await claudeCode.run({ prompt: classifyIntentPrompt(message), jsonSchema: INTENT_SCHEMA, maxTurns: 2, noSessionPersistence: true, timeout: TIMEOUTS.CLAUDE_QUICK, verbose: false });
+    const res = await claudeCode.run({
+      prompt: classifyIntentPrompt(message), jsonSchema: INTENT_SCHEMA,
+      maxTurns: 2, noSessionPersistence: true, timeout: TIMEOUTS.CLAUDE_QUICK,
+      verbose: true, logPrefix: logPrefix ? `${logPrefix} [classify]` : '[classify]', onBeforeLog,
+    });
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
     let intent = res.structuredOutput?.intent;
     if (!intent) {
       // Fallback: parse from text (in case structuredOutput isn't populated but result is JSON)
@@ -31,19 +38,20 @@ async function classifyIntent(claudeCode, message, log) {
       if (parsed?.success) intent = parsed.data.intent;
     }
     if (!intent) {
-      log(`  classifyIntent: no structured output, defaulting to PROPOSE`);
+      log(`  classifyIntent: no structured output, defaulting to PROPOSE (${elapsed}s)`);
       return true;
     }
     const isPropose = intent === 'PROPOSE';
-    log(`  classifyIntent: ${intent} → ${isPropose ? 'PROPOSE' : 'IMPLEMENT'}`);
+    log(`  classifyIntent: ${intent} → ${isPropose ? 'PROPOSE' : 'IMPLEMENT'} (${elapsed}s)`);
     return isPropose;
   } catch (err) {
-    log(`  classifyIntent failed (defaulting to PROPOSE): ${err.message}`);
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    log(`  classifyIntent failed (${elapsed}s, defaulting to PROPOSE): ${err.message}`);
     return true;
   }
 }
 
-function setupWorkspace(git, repos, { workdir, branch, resume }) {
+async function setupWorkspace(git, repos, { workdir, branch, resume }) {
   const dirNames = deriveRepoDirNames(repos);
   const repoDirs = [];
 
@@ -51,7 +59,7 @@ function setupWorkspace(git, repos, { workdir, branch, resume }) {
     for (let i = 0; i < repos.length; i++) {
       const dir = join(workdir, dirNames[i]);
       if (i === 0 || existsSync(join(dir, '.git'))) {
-        git.setBotIdentity(dir);
+        await git.setBotIdentity(dir);
         repoDirs.push({ url: repos[i].url, name: repoName(repos[i]), dirName: dirNames[i], dir });
       }
     }
@@ -61,8 +69,8 @@ function setupWorkspace(git, repos, { workdir, branch, resume }) {
   rmSync(workdir, { recursive: true, force: true });
   mkdirSync(workdir, { recursive: true });
   const dest = join(workdir, dirNames[0]);
-  git.clone(repos[0].url, dest);
-  if (branch) git.createBranch(dest, branch);
+  await git.clone(repos[0].url, dest);
+  if (branch) await git.createBranch(dest, branch);
   repoDirs.push({ url: repos[0].url, name: repoName(repos[0]), dirName: dirNames[0], dir: dest });
   return { repoDirs, dirNames, resumed: false };
 }
@@ -75,22 +83,22 @@ function discoverClonedRepos(repos, dirNames, workdir, repoDirs) {
   }
 }
 
-function pushAndCreatePRs(git, prs, repoDirs, { branch, issueId, issueTitle, primaryRepoName, prActId, config, hookOutputs, log }) {
+async function pushAndCreatePRs(git, prs, repoDirs, { branch, issueId, issueTitle, primaryRepoName, prActId, config, hookOutputs, log }) {
   let anyChanges = false, primaryPRCreated = false;
   const createdPRs = [];
 
   for (const { dir, name, dirName } of repoDirs) {
     gitExclude(dir, [...repoDirs.filter(r => r.dir !== dir).map(r => r.dirName), '.warp-coder-ask']);
-    if (git.status(dir)) git.commitAll(dir, `Implement #${issueId}: ${issueTitle}`);
-    if (git.getCurrentBranch(dir) !== branch && git.hasNewCommits(dir)) git.createBranch(dir, branch);
-    if (!git.hasNewCommits(dir)) continue;
+    if (await git.status(dir)) await git.commitAll(dir, `Implement #${issueId}: ${issueTitle}`);
+    if (await git.getCurrentBranch(dir) !== branch && await git.hasNewCommits(dir)) await git.createBranch(dir, branch);
+    if (!await git.hasNewCommits(dir)) continue;
 
     anyChanges = true;
-    git.push(dir, branch);
+    await git.push(dir, branch);
 
     const inPrimary = name === primaryRepoName;
     const body = [`${!primaryPRCreated ? 'Closes' : 'Part of'} ${inPrimary ? `#${issueId}` : `${primaryRepoName}#${issueId}`}`, '', 'Implemented by warp-coder.', ...(prActId ? ['', `<!-- wm:act:${prActId} -->`] : [])].join('\n');
-    const pr = prs.createPR(dir, { title: issueTitle, body, head: branch });
+    const pr = await prs.createPR(dir, { title: issueTitle, body, head: branch });
     log(`  ${dirName}: PR #${pr.number}`);
     createdPRs.push({ repo: name, number: pr.number, url: pr.url });
     primaryPRCreated = true;
@@ -112,7 +120,7 @@ export const definition = {
       const { config, clients: { notify }, context: { actOpts } } = ctx;
       if (actOpts && 'sessionId' in actOpts) return;
       const primaryRepo = config.repoNames[0];
-      notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `Starting implementation...` });
+      await notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `Starting implementation...` });
     },
     async success(run, result, ctx) {
       const { config, clients: { notify, issues, log } } = ctx;
@@ -120,7 +128,7 @@ export const definition = {
       const resultPrs = result.nextActOpts?.prs || [];
 
       const prList = resultPrs.map(p => `- ${p.repo}#${p.prNumber}`).join('\n');
-      notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `PRs ready for review:\n\n${prList}` });
+      await notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `PRs ready for review:\n\n${prList}` });
 
       const release = result.nextActOpts?.release || [];
       const repos = release.length > 0
@@ -129,7 +137,7 @@ export const definition = {
       const labels = [...new Set(repos)].map(r => `deploy:${r.split('/').pop()}`);
       if (labels.length === 0) return;
       try {
-        issues.addLabels(run.issueId, labels, { repo: primaryRepo });
+        await issues.addLabels(run.issueId, labels, { repo: primaryRepo });
         log(`tagged: ${labels.join(', ')}`);
       } catch (err) {
         log(`warning: could not add labels: ${err.message}`);
@@ -139,7 +147,7 @@ export const definition = {
       const { config, clients: { notify, log } } = ctx;
       const primaryRepo = config.repoNames[0];
       const error = result.error || 'Unknown error';
-      notify.comment(run.issueId, {
+      await notify.comment(run.issueId, {
         repo: primaryRepo, runId: run.id, title: run.title,
         body: `<!-- warp-coder:error\n${error}\n-->\n\nImplementation failed — needs human intervention.\n\n<details>\n<summary>Error details</summary>\n\n\`\`\`\n${error}\n\`\`\`\n</details>`,
       });
@@ -149,7 +157,7 @@ export const definition = {
       const { config, clients: { notify, log } } = ctx;
       const primaryRepo = config.repoNames[0];
       const marker = `<!-- warp-coder:question -->`;
-      notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `${marker}\n\nNeeds clarification:\n\n${result.question}` });
+      await notify.comment(run.issueId, { repo: primaryRepo, runId: run.id, title: run.title, body: `${marker}\n\nNeeds clarification:\n\n${result.question}` });
       log(`posted clarification question`);
     },
   },
@@ -179,39 +187,26 @@ export async function implement(item, ctx) {
   const issueBody = item.content?.body || '';
   const repos = config.repos;
   const primaryRepo = repoName(repos[0]);
-  const branch = typeof issueId === 'number' ? `agent/issue-${issueId}` : `agent/${issueId}`;
+  const branch = issueBranch(issueId);
   const workdir = join(tmpdir(), 'warp-coder', String(issueId));
   const configDir = join(process.cwd(), CONFIG_DIR);
   const hookOutputs = [];
   const prActReserved = config.warpmetricsApiKey ? warp.reserveAct(ACTS.REVIEW) : null;
 
-  // Short-circuit: if open PRs already exist for this issue, skip to review.
-  if (!resumeSession) {
-    const repoNames = repos.map(r => repoName(r));
-    const existingPRs = prs.findAllPRs(issueId, repoNames, { branchPattern: branch });
-    if (existingPRs.length > 0) {
-      log(`  found existing PR(s): ${existingPRs.map(p => `${p.repo}#${p.prNumber}`).join(', ')} — skipping to review`);
-      return {
-        type: 'success', costUsd: 0, trace: null, sessionId: null,
-        prs: existingPRs.map(p => ({ repo: p.repo, prNumber: p.prNumber })),
-        deployPlan: null, deployPlanFailed: false,
-      };
-    }
-  }
-
-  // 1. Workspace
-
-  const { repoDirs, dirNames, resumed } = setupWorkspace(git, repos, { workdir, branch, resume: resumeSession });
-  if (!resumed) safeHook('onBranchCreate', config, { workdir, issueNumber: issueId, branch, repo: primaryRepo }, hookOutputs);
-  log(resumed ? `  resuming in ${workdir}` : `  cloned ${primaryRepo}, branch: ${branch}`);
-  const skillCount = installSkills(configDir, workdir);
-  if (skillCount) log(`  installed ${skillCount} skill(s)`);
-
   try {
+    // 1. Workspace
+
+    const { repoDirs, dirNames, resumed } = await setupWorkspace(git, repos, { workdir, branch, resume: resumeSession });
+    if (!resumed) safeHook('onBranchCreate', config, { workdir, issueNumber: issueId, branch, repo: primaryRepo }, hookOutputs);
+    log(resumed ? `  resuming in ${workdir}` : `  cloned ${primaryRepo}, branch: ${branch}`);
+    const skillCount = installSkills(configDir, workdir);
+    if (skillCount) log(`  installed ${skillCount} skill(s)`);
     // 2. Context
-    const { commentsText, lastHumanMessage } = fetchComments(issues, issueId, primaryRepo, log);
+    const { commentsText, lastHumanMessage } = await fetchComments(issues, issueId, primaryRepo, log);
     const memory = config.memory?.enabled !== false ? loadMemory(configDir) : '';
-    const shouldPropose = await classifyIntent(claudeCode, lastHumanMessage || issueBody, log);
+    const logPrefix = `[#${issueId}] [implement]`;
+    onStep?.('classifying');
+    const shouldPropose = await classifyIntent(claudeCode, lastHumanMessage || issueBody, { log, logPrefix, onBeforeLog });
 
     // 3. Prompt
     const repoUrls = repos.map(r => r.url);
@@ -222,12 +217,12 @@ export async function implement(item, ctx) {
     });
 
     // 4. Claude
-    onStep?.('claude');
+    onStep?.(shouldPropose ? 'proposing' : 'implementing');
     const result = await claudeCode.run({
       prompt, workdir,
       resume: resumed ? resumeSession : undefined,
       disallowedTools: config.claude?.disallowedTools || ['Bash(gh *)'],
-      logPrefix: `[#${issueId}] [implement]`, onBeforeLog,
+      logPrefix, onBeforeLog,
     });
     log(`  claude done (cost: $${result.costUsd ?? '?'})`);
 
@@ -252,7 +247,7 @@ export async function implement(item, ctx) {
 
     onStep?.('pushing');
     safeHook('onBeforePush', config, { workdir, issueNumber: issueId, branch, repo: primaryRepo }, hookOutputs);
-    const { createdPRs, anyChanges } = pushAndCreatePRs(git, prs, repoDirs, {
+    const { createdPRs, anyChanges } = await pushAndCreatePRs(git, prs, repoDirs, {
       branch, issueId, issueTitle, primaryRepoName: primaryRepo, prActId: prActReserved?.id, config, hookOutputs, log,
     });
     if (!anyChanges) throw new Error('No changes were produced');
@@ -271,6 +266,7 @@ export async function implement(item, ctx) {
     reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: true, hookOutputs, claudeOutput: result.result }, log, claudeCode);
     return { type: 'success', costUsd: result.costUsd, trace: result.trace, sessionId: result.sessionId, prs: createdPRs.map(p => ({ repo: p.repo, prNumber: p.number })), deployPlan, deployPlanFailed };
   } catch (err) {
+    try { rmSync(workdir, { recursive: true, force: true }); } catch {}
     reflectOnStep(config, configDir, 'implement', { issue: { number: issueId, title: issueTitle }, success: false, error: err.message, hookOutputs }, log, claudeCode);
     return { type: 'error', error: err.message, costUsd: null, trace: null };
   }

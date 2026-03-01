@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { GRAPH, STATES } from './machine.js';
+import { GRAPH, STATES, TRIGGERS } from './machine.js';
 import { normalizeOutcomes } from './index.js';
 import { OUTCOMES, ACTS } from './names.js';
 
@@ -218,6 +218,7 @@ describe('RESULT_OUTCOMES', () => {
     ['await_reply:waiting', OUTCOMES.WAITING],
     ['deploy:success', OUTCOMES.DEPLOYED],
     ['deploy:error', OUTCOMES.DEPLOY_FAILED],
+    ['deploy:max_retries', OUTCOMES.MAX_RETRIES],
     ['release:success', OUTCOMES.RELEASED],
     ['release:error', OUTCOMES.RELEASE_FAILED],
   ];
@@ -249,6 +250,7 @@ describe('NEXT_ACT', () => {
     ['await_reply:waiting', ACTS.AWAIT_REPLY],
     ['deploy:success', ACTS.RELEASE],
     ['deploy:error', ACTS.AWAIT_DEPLOY],
+    ['deploy:max_retries', null],
     ['release:success', null],
     ['release:error', ACTS.PUBLISH],
   ];
@@ -318,7 +320,7 @@ describe('STATES', () => {
     [OUTCOMES.REVIEW_FAILED, 'blocked'],
     [OUTCOMES.RESUMED, 'inProgress'],
     [OUTCOMES.MANUAL_RELEASE, 'done'],
-    [OUTCOMES.ABORTED, 'blocked'],
+    [OUTCOMES.CANCELLED, 'cancelled'],
     [OUTCOMES.BUILDING, 'inProgress'],
     [OUTCOMES.REVIEWING, 'inReview'],
     [OUTCOMES.RELEASING, 'deploy'],
@@ -329,4 +331,54 @@ describe('STATES', () => {
       assert.equal(STATES[outcome], col);
     });
   }
+});
+
+describe('TRIGGERS', () => {
+  it('has 5 triggers defined', () => {
+    assert.equal(Object.keys(TRIGGERS).length, 5);
+  });
+
+  it('deploy trigger references valid act and result', () => {
+    const t = TRIGGERS.deploy;
+    assert.equal(t.type, 'act');
+    assert.equal(t.act, ACTS.AWAIT_DEPLOY);
+    assert.equal(t.result, 'approved');
+    assert.equal(t.label, 'Approve Deploy');
+    assert.ok(GRAPH[t.act], 'act exists in graph');
+    assert.ok(GRAPH[t.act].results[t.result], 'result exists on act');
+  });
+
+  it('reply trigger references valid act and result', () => {
+    const t = TRIGGERS.reply;
+    assert.equal(t.type, 'act');
+    assert.equal(t.act, ACTS.AWAIT_REPLY);
+    assert.equal(t.result, 'replied');
+    assert.ok(GRAPH[t.act].results[t.result]);
+  });
+
+  it('cancel trigger references valid outcome in states', () => {
+    const t = TRIGGERS.cancel;
+    assert.equal(t.type, 'global');
+    assert.equal(t.outcome, OUTCOMES.CANCELLED);
+    assert.ok(t.outcome in STATES);
+  });
+
+  it('ship trigger references valid outcome in states', () => {
+    const t = TRIGGERS.ship;
+    assert.equal(t.type, 'global');
+    assert.equal(t.outcome, OUTCOMES.MANUAL_RELEASE);
+    assert.ok(t.outcome in STATES);
+  });
+
+  it('reset trigger has type reset and label', () => {
+    const t = TRIGGERS.reset;
+    assert.equal(t.type, 'reset');
+    assert.equal(t.label, 'Reset to Checkpoint');
+  });
+
+  it('all triggers have labels', () => {
+    for (const [name, trigger] of Object.entries(TRIGGERS)) {
+      assert.ok(typeof trigger.label === 'string' && trigger.label.length > 0, `trigger '${name}' missing label`);
+    }
+  });
 });

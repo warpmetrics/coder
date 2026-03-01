@@ -2,7 +2,7 @@
 // Extracted from watch.js inline executor.
 
 import { generateChangelogEntry, createChangelogProvider } from './changelog.js';
-import { PUBLIC_CHANGELOG as PUBLIC_PROMPT, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from './prompt.js';
+import { publicChangelog, PRIVATE_CHANGELOG as PRIVATE_PROMPT } from './prompt.js';
 import { OUTCOMES } from '../../graph/names.js';
 
 export const definition = {
@@ -70,8 +70,8 @@ export async function release(run, ctx) {
   const prContext = [];
   for (const { repo, prNumber } of allPrs) {
     try {
-      const files = prs.getPRFiles(prNumber, { repo });
-      const commits = prs.getPRCommits(prNumber, { repo });
+      const files = await prs.getPRFiles(prNumber, { repo });
+      const commits = await prs.getPRCommits(prNumber, { repo });
       prContext.push({ repo, prNumber, files, commits });
     } catch (err) {
       log(`warning: could not fetch PR ${repo}#${prNumber}: ${err.message}`);
@@ -92,7 +92,8 @@ export async function release(run, ctx) {
   const context = `Issues:\n${allIssueLines.join('\n')}\n\n---\n\nChanges:\n${technicalContext}`;
 
   log('generating changelog entries...');
-  const publicResult = await generateChangelogEntry(claudeCode, `${PUBLIC_PROMPT}\n\n---\n\n${context}`);
+  const publicPrompt = publicChangelog(config.changelog?.productName);
+  const publicResult = await generateChangelogEntry(claudeCode, `${publicPrompt}\n\n---\n\n${context}`);
   const privateResult = await generateChangelogEntry(claudeCode, `${PRIVATE_PROMPT}\n\n---\n\n${context}`);
 
   const totalCost = (publicResult?.costUsd || 0) + (privateResult?.costUsd || 0);

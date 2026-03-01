@@ -3,9 +3,9 @@
 
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdirSync, existsSync } from 'fs';
-import { repoName, deriveRepoDirNames, CONFIG_DIR } from '../../config.js';
-import { LIMITS } from '../../defaults.js';
+import { mkdirSync, rmSync, existsSync } from 'fs';
+import { repoName, deriveRepoDirNames, issueBranch, CONFIG_DIR } from '../../config.js';
+import { LIMITS, TIMEOUTS } from '../../defaults.js';
 import { fetchComments } from '../../clients/claude-code.js';
 import { buildReviewPrompt, REVIEW_SCHEMA, ReviewVerdictSchema } from './prompt.js';
 import { installSkills } from '../../agent/skills.js';
@@ -29,7 +29,7 @@ export const definition = {
         const retryCount = (context.actOpts?.reviewRetryCount || 0) + 1;
         const limit = config.claude?.reviewMaxRetries || LIMITS.MAX_REVIEW_RETRIES;
         if (retryCount >= limit) {
-          context.log(`review failed ${retryCount} times, giving up`);
+          clients.log(`review failed ${retryCount} times, giving up`);
           return { ...r, type: 'max_retries', outcomeOpts: { prNumber: r.prNumber },
             nextActOpts: { prs: r.prs || context.actOpts?.prs, release: context.actOpts?.release, sessionId: context.actOpts?.sessionId } };
         }
@@ -53,8 +53,8 @@ export async function review(item, ctx) {
   try {
     // 1. Find PRs
     onStep?.('finding PRs');
-    const branchPattern = typeof issueId === 'number' ? `agent/issue-${issueId}` : `agent/${issueId}`;
-    const foundPRs = prs.findAllPRs(issueId, repoNames || repos.map(r => repoName(r)), { branchPattern });
+    const branchPattern = issueBranch(issueId);
+    const foundPRs = await prs.findAllPRs(issueId, repoNames || repos.map(r => repoName(r)), { branchPattern });
     if (foundPRs.length === 0) {
       log('  no open PRs found');
       return { type: 'error', error: 'No open PRs found', costUsd: null, trace: null };
@@ -75,14 +75,14 @@ export async function review(item, ctx) {
       if (pr) {
         if (workdirExists && existsSync(join(dest, '.git'))) {
           // Reuse existing workdir from implement
-          const branch = prs.getPRBranch(pr.prNumber, { repo: name });
+          const branch = await prs.getPRBranch(pr.prNumber, { repo: name });
           repoDirs.push({ url, name, dirName, dir: dest, prNumber: pr.prNumber, branch });
           log(`  reusing ${name} (branch: ${branch})`);
         } else {
           // Fallback: clone fresh
           mkdirSync(workdir, { recursive: true });
-          const branch = prs.getPRBranch(pr.prNumber, { repo: name });
-          git.clone(url, dest, { branch });
+          const branch = await prs.getPRBranch(pr.prNumber, { repo: name });
+          await git.clone(url, dest, { branch });
           repoDirs.push({ url, name, dirName, dir: dest, prNumber: pr.prNumber, branch });
           log(`  cloned ${name} (branch: ${branch})`);
         }
@@ -100,10 +100,10 @@ export async function review(item, ctx) {
 
     let issueBody = '';
     try {
-      issueBody = issues.getIssueBody(issueId, { repo: primaryRepo });
+      issueBody = await issues.getIssueBody(issueId, { repo: primaryRepo });
     } catch (err) { log(`  warning: getIssueBody failed: ${err.message}`); }
 
-    const { commentsText } = fetchComments(issues, issueId, primaryRepo, log);
+    const { commentsText } = await fetchComments(issues, issueId, primaryRepo, log);
 
     // 4. Review: let Claude explore the diff and produce a JSON verdict
     onStep?.('reviewing');
@@ -113,7 +113,7 @@ export async function review(item, ctx) {
 
     const maxTurns = config.claude?.reviewMaxTurns || LIMITS.MAX_REVIEW_TURNS;
     const result = await claudeCode.run({
-      prompt, workdir, maxTurns,
+      prompt, workdir, maxTurns, timeout: TIMEOUTS.REVIEW,
       jsonSchema: REVIEW_SCHEMA,
       disallowedTools: ['Edit', 'Write', 'NotebookEdit', 'Bash(gh *)'],
       logPrefix: `[#${issueId}] [review]`, onBeforeLog,
@@ -155,7 +155,7 @@ export async function review(item, ctx) {
     const submitErrors = [];
     for (const rd of repoDirs) {
       try {
-        prs.submitReview(rd.prNumber, {
+        await prs.submitReview(rd.prNumber, {
           repo: rd.name,
           event,
           body: reviewData.summary || '',
@@ -191,6 +191,7 @@ export async function review(item, ctx) {
       return { type: 'changes_requested', ...base };
     }
   } catch (err) {
+    try { rmSync(workdir, { recursive: true, force: true }); } catch {}
     return { type: 'error', error: err.message, costUsd: null, trace: null };
   }
 }

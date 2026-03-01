@@ -26,12 +26,18 @@ describe('createChangelogProvider', () => {
     assert.ok(typeof provider.post === 'function');
   });
 
-  it('warpmetrics provider: has post method', () => {
+  it('api provider: has post method', () => {
     const provider = createChangelogProvider({
-      changelog: { provider: 'warpmetrics', url: 'https://api.test.com', token: 'test-token' },
+      changelog: { provider: 'api', url: 'https://api.test.com', token: 'test-token' },
     });
     assert.ok(provider);
     assert.ok(typeof provider.post === 'function');
+  });
+
+  it('api provider: throws without url', () => {
+    assert.throws(() => createChangelogProvider({
+      changelog: { provider: 'api', token: 'test-token' },
+    }), /requires a "url"/);
   });
 });
 

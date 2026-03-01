@@ -36,6 +36,8 @@
   ],
   "dependencies": {
     "@warpmetrics/warp": "^0.0.22",
+    "ink": "^6.8.0",
+    "react": ">=19.0.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
   }

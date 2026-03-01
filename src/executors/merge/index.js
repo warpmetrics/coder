@@ -8,7 +8,7 @@ export const definition = {
   effects: {
     async success(run, result, ctx) {
       const { config, clients: { notify } } = ctx;
-      notify.comment(run.issueId, {
+      await notify.comment(run.issueId, {
         repo: config.repoNames[0], runId: run.id, title: run.title,
         body: `Merged successfully. Move to **Deploy** to trigger deployment.`,
       });
@@ -25,11 +25,11 @@ export const definition = {
 
       if (r.type === 'success') {
         return { ...r, outcomeOpts: { prNumber: prs[0]?.prNumber },
-          nextActOpts: { prs, release: context.actOpts?.release } };
+          nextActOpts: { prs, release: context.actOpts?.release, sessionId: context.actOpts?.sessionId } };
       }
       const retryPrs = r.failedPrs?.length ? r.failedPrs : prs;
       return { ...r, outcomeOpts: { prNumber: prs[0]?.prNumber },
-        nextActOpts: { prs: retryPrs, release: context.actOpts?.release } };
+        nextActOpts: { prs: retryPrs, release: context.actOpts?.release, sessionId: context.actOpts?.sessionId } };
     };
   },
 };
@@ -52,7 +52,7 @@ export async function merge(item, ctx) {
   for (const { repo, prNumber } of prList) {
     try {
       try {
-        const state = ch.getPRState(prNumber, { repo });
+        const state = await ch.getPRState(prNumber, { repo });
         if (state === 'MERGED') {
           log(`PR #${prNumber} in ${repo} already merged — skipping`);
           merged.push({ repo, prNumber });
@@ -66,11 +66,11 @@ export async function merge(item, ctx) {
       } catch (err) { log(`  warning: pre-merge state check failed for ${repo}#${prNumber}: ${err.message}`); }
 
       runHook('onBeforeMerge', config, { prNumber, repo });
-      ch.mergePR(prNumber, { repo });
+      await ch.mergePR(prNumber, { repo });
 
       // Verify the merge actually succeeded
       try {
-        const postState = ch.getPRState(prNumber, { repo });
+        const postState = await ch.getPRState(prNumber, { repo });
         if (postState !== 'MERGED') {
           mergeError = new Error(`PR #${prNumber} in ${repo} merge call succeeded but state is ${postState}, not MERGED`);
           log(mergeError.message);
@@ -97,8 +97,8 @@ export async function merge(item, ctx) {
     let prDetails = [];
     try {
       for (const { repo, prNumber } of prList) {
-        const files = ch.getPRFiles(prNumber, { repo });
-        const commits = ch.getPRCommits(prNumber, { repo });
+        const files = await ch.getPRFiles(prNumber, { repo });
+        const commits = await ch.getPRCommits(prNumber, { repo });
         prDetails.push({ repo, prNumber, files, commits });
       }
     } catch (err) {
@@ -126,7 +126,7 @@ export async function merge(item, ctx) {
           '<details><summary>Files</summary>', '', fileLines, '', '</details>',
         ].join('\n'));
       }
-      notify.comment(issueId, { repo: primaryRepoName, runId: item._runId, title: item.content?.title, body: `Shipped\n\n${sections.join('\n\n')}` });
+      await notify.comment(issueId, { repo: primaryRepoName, runId: item._runId, title: item.content?.title, body: `Shipped\n\n${sections.join('\n\n')}` });
       log(`posted summary on issue #${issueId}`);
     } catch (err) {
       log(`warning: failed to post issue summary: ${err.message}`);

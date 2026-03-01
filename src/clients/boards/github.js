@@ -2,16 +2,24 @@
 // Manages issue workflow state only — PR concerns live in pr.js.
 // Uses `gh` CLI for all API interactions.
 
-import { execFileSync } from 'child_process';
+import { execAsync } from '../exec.js';
+import { TIMEOUTS } from '../../defaults.js';
 
-function gh(args) {
-  return execFileSync('gh', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+async function gh(args) {
+  try {
+    const out = await execAsync('gh', args, { timeout: TIMEOUTS.GH });
+    return out.trim();
+  } catch (err) {
+    const stderr = err.stderr?.toString().trim();
+    const msg = stderr || err.message?.split('\n')[0] || 'gh command failed';
+    throw new Error(msg);
+  }
 }
 
-function ghJson(args) {
-  const out = gh(args);
+async function ghJson(args) {
+  const out = await gh(args);
   if (!out) return null;
-  try { return JSON.parse(out); } catch { return null; }
+  try { return JSON.parse(out); } catch { throw new Error(`Failed to parse gh JSON output: ${out.slice(0, 200)}`); }
 }
 
 export function create({ project, owner, statusField = 'Status', columns = {} }) {
@@ -24,25 +32,25 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
     done: columns.done || 'Done',
     blocked: columns.blocked || 'Blocked',
     waiting: columns.waiting || 'Waiting for Input',
-    aborted: columns.aborted || 'Aborted',
+    cancelled: columns.cancelled || 'Cancelled',
   };
 
   let projectNodeId = null;
   let fieldId = null;
   let optionIds = null;
 
-  function discoverProject() {
+  async function discoverProject() {
     if (projectNodeId) return;
-    const projects = ghJson(['project', 'list', '--owner', owner, '--format', 'json']);
+    const projects = await ghJson(['project', 'list', '--owner', owner, '--format', 'json']);
     const proj = projects?.projects?.find(p => p.number === project);
     if (!proj) throw new Error(`Project #${project} not found for owner ${owner}`);
     projectNodeId = proj.id;
   }
 
-  function discoverField() {
+  async function discoverField() {
     if (fieldId) return;
-    discoverProject();
-    const fields = ghJson(['project', 'field-list', String(project), '--owner', owner, '--format', 'json']);
+    await discoverProject();
+    const fields = await ghJson(['project', 'field-list', String(project), '--owner', owner, '--format', 'json']);
     const field = fields?.fields?.find(f => f.name === statusField);
     if (!field) throw new Error(`Status field "${statusField}" not found in project ${project}`);
     fieldId = field.id;
@@ -52,8 +60,8 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
     }
   }
 
-  function getOptionId(colKey) {
-    discoverField();
+  async function getOptionId(colKey) {
+    await discoverField();
     const name = colNames[colKey];
     const id = optionIds[name];
     if (!id) throw new Error(`Column "${name}" not found. Available: ${Object.keys(optionIds).join(', ')}`);
@@ -64,8 +72,8 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
   const MAX_PAGES = 10;
   let cachedItems = null;
 
-  function fetchItemsPage(cursor) {
-    discoverProject();
+  async function fetchItemsPage(cursor) {
+    await discoverProject();
     const afterClause = cursor ? `, after: "${cursor}"` : '';
     const query = `{
       node(id: "${projectNodeId}") {
@@ -118,10 +126,10 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
     return items;
   }
 
-  function moveItem(item, colKey) {
-    discoverField();
-    const optId = getOptionId(colKey);
-    gh(['project', 'item-edit', '--id', item.id, '--project-id', projectNodeId, '--field-id', fieldId, '--single-select-option-id', optId]);
+  async function moveItem(item, colKey) {
+    await discoverField();
+    const optId = await getOptionId(colKey);
+    await gh(['project', 'item-edit', '--id', item.id, '--project-id', projectNodeId, '--field-id', fieldId, '--single-select-option-id', optId]);
   }
 
   return {
@@ -129,7 +137,7 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
       const items = [];
       let cursor = null;
       for (let page = 0; page < MAX_PAGES; page++) {
-        const result = fetchItemsPage(cursor);
+        const result = await fetchItemsPage(cursor);
         const connection = result?.data?.node?.items;
         if (!connection) break;
         for (const node of connection.nodes) {
@@ -158,14 +166,14 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
       return enrichWithIssueId(getItemsByStatus(colNames.waiting));
     },
 
-    moveToTodo(item) { return moveItem(item, 'todo'); },
-    moveToInProgress(item) { return moveItem(item, 'inProgress'); },
-    moveToReview(item) { return moveItem(item, 'inReview'); },
-    moveToReadyForDeploy(item) { return moveItem(item, 'readyForDeploy'); },
-    moveToDeploy(item) { return moveItem(item, 'deploy'); },
-    moveToBlocked(item) { return moveItem(item, 'blocked'); },
-    moveToWaiting(item) { return moveItem(item, 'waiting'); },
-    moveToDone(item) { return moveItem(item, 'done'); },
+    async moveToTodo(item) { await moveItem(item, 'todo'); },
+    async moveToInProgress(item) { await moveItem(item, 'inProgress'); },
+    async moveToReview(item) { await moveItem(item, 'inReview'); },
+    async moveToReadyForDeploy(item) { await moveItem(item, 'readyForDeploy'); },
+    async moveToDeploy(item) { await moveItem(item, 'deploy'); },
+    async moveToBlocked(item) { await moveItem(item, 'blocked'); },
+    async moveToWaiting(item) { await moveItem(item, 'waiting'); },
+    async moveToDone(item) { await moveItem(item, 'done'); },
 
     async listReadyForDeploy() {
       return enrichWithIssueId(getItemsByStatus(colNames.readyForDeploy));
@@ -183,9 +191,10 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
       return enrichWithIssueId(getItemsByStatus(colNames.done));
     },
 
-    async listAborted() {
-      return enrichWithIssueId(getItemsByStatus(colNames.aborted));
+    async listCancelled() {
+      return enrichWithIssueId(getItemsByStatus(colNames.cancelled));
     },
+    async moveToCancelled(item) { await moveItem(item, 'cancelled'); },
   };
 }
 
@@ -193,7 +202,7 @@ export function create({ project, owner, statusField = 'Status', columns = {} })
 // Field discovery for init wizard
 // ---------------------------------------------------------------------------
 
-export function discoverProjectFields(project, owner) {
-  const fields = ghJson(['project', 'field-list', String(project), '--owner', owner, '--format', 'json']);
+export async function discoverProjectFields(project, owner) {
+  const fields = await ghJson(['project', 'field-list', String(project), '--owner', owner, '--format', 'json']);
   return fields?.fields || [];
 }

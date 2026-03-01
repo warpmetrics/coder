@@ -1,9 +1,8 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRunner } from './runner.js';
-import { GRAPH, STATES } from './graph/machine.js';
+import { createRunner, findRecoveryTarget } from './runner.js';
+import { GRAPH, STATES, TRIGGERS, CHECKPOINTS } from './graph/machine.js';
 import { OUTCOMES, ACTS } from './graph/names.js';
-import { implement } from './executors/implement/index.js';
 
 // ---------------------------------------------------------------------------
 // Mock factory
@@ -82,7 +81,7 @@ function createMocks() {
   const effects = {};
   const logs = [];
 
-  return { warp, board, git, prs, issues, notify, claudeCode, config, graph: GRAPH, states: STATES, execute, effects, calls, logs,
+  return { warp, board, git, prs, issues, notify, claudeCode, config, graph: GRAPH, states: STATES, triggers: TRIGGERS, checkpoints: CHECKPOINTS, execute, effects, calls, logs,
     log: (id, msg) => logs.push({ id, msg }) };
 }
 
@@ -637,18 +636,18 @@ describe('poll', () => {
     assert.equal(stats.processing, 0);
   });
 
-  it('abort: records ABORTED outcome when issue is in Aborted column', async () => {
+  it('cancel: records CANCELLED outcome when issue is in Cancelled column', async () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({ latestOutcome: OUTCOMES.PR_CREATED })];
-    m.board.scanAborted = async () => new Set(['owner/repo#42']);
+    m.board.scanCancelled = async () => new Set(['owner/repo#42']);
     const runner = createRunner({ ...m, log: m.log });
 
     await runner.poll();
     await runner.waitForInFlight();
 
-    const abortOcs = m.calls.filter(c => c.name === 'recordIssueOutcome' && c.args[1].name === OUTCOMES.ABORTED);
-    assert.equal(abortOcs.length, 1);
-    assert.equal(abortOcs[0].args[1].runId, 'run-1');
+    const cancelOcs = m.calls.filter(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.CANCELLED);
+    assert.equal(cancelOcs.length, 1);
+    assert.equal(cancelOcs[0].args[1].runId, 'run-1');
   });
 
   it('contextProviders: deploy provider is called and batch passed through', async () => {
@@ -1005,49 +1004,98 @@ describe('resultType enforcement', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Retry from Blocked tests
+// Recovery tests (checkpoint-based)
 // ---------------------------------------------------------------------------
 
-describe('retry from blocked', () => {
-  it('retries Implement when latestOutcome is Implementation Failed', async () => {
-    const m = createMocks();
-    m.execute.implement = async () => ({
-      type: 'success', costUsd: 0.5, trace: null, outcomeOpts: {},
-      nextActOpts: { prs: [{ repo: 'owner/repo', prNumber: 1 }], release: [] },
-    });
+describe('recovery from checkpoint', () => {
+  // Helper: build outcomes array with checkpoint acts (mimics WM API data)
+  function oc(name, acts = []) {
+    return { name, acts: acts.map(a => ({ name: a.name, opts: a.opts || {} })) };
+  }
 
+  it('recovers to Build when last checkpoint is Started', async () => {
+    const m = createMocks();
+    const buildOpts = { repo: 'owner/repo', issue: '42', title: 'Test' };
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
       latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
       groups: new Map([['Build', 'build-group-1']]),
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: buildOpts }]),
+        oc(OUTCOMES.BUILDING),
+        oc(OUTCOMES.IMPLEMENTATION_FAILED),
+      ],
     })];
     m.board.scanBlocked = async () => new Set();
 
     const runner = createRunner({ ...m, log: m.log });
     await runner.poll();
     await runner.waitForInFlight();
-    await new Promise(r => setTimeout(r, 0));
+
+    // Should close the stuck group with Interrupted first.
+    const interruptedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.INTERRUPTED);
+    assert.ok(interruptedOc, 'should record INTERRUPTED on stuck group');
+    assert.equal(interruptedOc.args[1].runId, 'build-group-1', 'INTERRUPTED on Build group');
 
     const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
     assert.ok(resumedOc, 'should record RESUMED outcome');
-    assert.equal(resumedOc.args[1].runId, 'build-group-1');
+    assert.equal(resumedOc.args[1].runId, 'run-1', 'RESUMED on Issue Run');
+
+    // Interrupted should come before Resumed in the batch.
+    const interruptedIdx = m.calls.indexOf(interruptedOc);
+    const resumedIdx = m.calls.indexOf(resumedOc);
+    assert.ok(interruptedIdx < resumedIdx, 'INTERRUPTED should be batched before RESUMED');
 
     const reEmit = m.calls.find(c => c.name === 'batchAct');
     assert.ok(reEmit, 'should re-emit the act');
-    assert.equal(reEmit.args[1].name, ACTS.IMPLEMENT);
+    assert.equal(reEmit.args[1].name, ACTS.BUILD);
+    assert.deepEqual(reEmit.args[1].opts, buildOpts, 'should carry checkpoint opts');
 
     assert.ok(m.calls.find(c => c.name === 'batchFlush'), 'should flush');
 
-    const retryLog = m.logs.find(l => l.msg.includes('retrying') && l.msg.includes('Implement'));
-    assert.ok(retryLog, 'should log retry');
+    const recoverLog = m.logs.find(l => l.msg.includes('recovering') && l.msg.includes('Build'));
+    assert.ok(recoverLog, 'should log recovery');
   });
 
-  it('retries Evaluate when latestOutcome is Failed (review max_retries)', async () => {
+  it('skips Interrupted when no group exists for the phase', async () => {
     const m = createMocks();
+    const buildOpts = { repo: 'owner/repo', issue: '42', title: 'Test' };
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+      groups: new Map(), // no groups
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: buildOpts }]),
+        oc(OUTCOMES.IMPLEMENTATION_FAILED),
+      ],
+    })];
+    m.board.scanBlocked = async () => new Set();
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const interruptedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.INTERRUPTED);
+    assert.equal(interruptedOc, undefined, 'should not emit INTERRUPTED when no group exists');
+
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.ok(resumedOc, 'should still recover');
+  });
+
+  it('recovers to Review when last checkpoint is PR Created', async () => {
+    const m = createMocks();
+    const reviewOpts = { prs: [{ repo: 'owner/repo', prNumber: 1 }], release: [], sessionId: 's1' };
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
       latestOutcome: OUTCOMES.REVIEW_FAILED,
       groups: new Map([['Build', 'build-group-1'], ['Review', 'review-group-1']]),
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: { repo: 'owner/repo', issue: '42', title: 'T' } }]),
+        oc(OUTCOMES.BUILDING),
+        oc(OUTCOMES.PR_CREATED, [{ name: ACTS.REVIEW, opts: reviewOpts }]),
+        oc(OUTCOMES.REVIEWING),
+        oc(OUTCOMES.REVIEW_FAILED),
+      ],
     })];
     m.board.scanBlocked = async () => new Set();
 
@@ -1055,20 +1103,28 @@ describe('retry from blocked', () => {
     await runner.poll();
     await runner.waitForInFlight();
 
-    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
-    assert.ok(resumedOc, 'should record RESUMED outcome');
-    assert.equal(resumedOc.args[1].runId, 'review-group-1');
+    // Should close Review group with Interrupted.
+    const interruptedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.INTERRUPTED);
+    assert.ok(interruptedOc, 'should record INTERRUPTED on stuck Review group');
+    assert.equal(interruptedOc.args[1].runId, 'review-group-1');
 
     const reEmit = m.calls.find(c => c.name === 'batchAct');
-    assert.equal(reEmit.args[1].name, ACTS.EVALUATE);
+    assert.equal(reEmit.args[1].name, ACTS.REVIEW);
+    assert.deepEqual(reEmit.args[1].opts, reviewOpts, 'should carry PR Created checkpoint opts');
   });
 
-  it('retries Merge when latestOutcome is Merge Failed', async () => {
+  it('recovers to Deploy when last checkpoint is Merged', async () => {
     const m = createMocks();
+    const deployOpts = { prs: [{ repo: 'r', prNumber: 1 }], release: [], sessionId: 's1' };
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
-      latestOutcome: OUTCOMES.MERGE_FAILED,
-      groups: new Map([['Build', 'b1'], ['Review', 'review-group-1']]),
+      latestOutcome: OUTCOMES.DEPLOY_FAILED,
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD }]),
+        oc(OUTCOMES.PR_CREATED, [{ name: ACTS.REVIEW }]),
+        oc(OUTCOMES.MERGED, [{ name: ACTS.DEPLOY, opts: deployOpts }]),
+        oc(OUTCOMES.DEPLOY_FAILED),
+      ],
     })];
     m.board.scanBlocked = async () => new Set();
 
@@ -1077,16 +1133,19 @@ describe('retry from blocked', () => {
     await runner.waitForInFlight();
 
     const reEmit = m.calls.find(c => c.name === 'batchAct');
-    assert.ok(reEmit, 'should re-emit act');
-    assert.equal(reEmit.args[1].name, ACTS.MERGE);
+    assert.equal(reEmit.args[1].name, ACTS.DEPLOY);
+    assert.deepEqual(reEmit.args[1].opts, deployOpts);
   });
 
-  it('does not retry when card is still in Blocked column', async () => {
+  it('does not recover when card is still in Blocked column (failure)', async () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
       latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
-      groups: new Map([['Build', 'build-group-1']]),
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: { repo: 'r', issue: '42', title: 'T' } }]),
+        oc(OUTCOMES.IMPLEMENTATION_FAILED),
+      ],
     })];
     m.board.scanBlocked = async () => new Set(['owner/repo#42']);
 
@@ -1095,17 +1154,41 @@ describe('retry from blocked', () => {
     await runner.waitForInFlight();
 
     const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
-    assert.equal(resumedOc, undefined, 'should not record RESUMED when still blocked');
+    assert.equal(resumedOc, undefined, 'should not recover when still blocked');
   });
 
-  it('does not retry when issue is already in-flight', async () => {
+  it('does recover stuck run even when in Blocked column (non-failure)', async () => {
+    const m = createMocks();
+    // Stuck run with a non-failure latestOutcome but no pendingAct (crash scenario)
+    m.warp.findOpenIssueRuns = async () => [makeRun({
+      pendingAct: null,
+      latestOutcome: OUTCOMES.BUILDING,
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: { repo: 'r', issue: '42', title: 'T' } }]),
+        oc(OUTCOMES.BUILDING),
+      ],
+    })];
+    m.board.scanBlocked = async () => new Set(['owner/repo#42']);
+
+    const runner = createRunner({ ...m, log: m.log });
+    await runner.poll();
+    await runner.waitForInFlight();
+
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.ok(resumedOc, 'should recover stuck non-failure run even if in Blocked column');
+  });
+
+  it('does not recover when issue is already in-flight', async () => {
     const m = createMocks();
     let resolveExecutor;
     m.execute = { implement: () => new Promise(resolve => { resolveExecutor = resolve; }) };
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
       latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
-      groups: new Map([['Build', 'build-group-1']]),
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: { repo: 'r', issue: '42', title: 'T' } }]),
+        oc(OUTCOMES.IMPLEMENTATION_FAILED),
+      ],
     })];
     m.board.scanBlocked = async () => new Set();
 
@@ -1116,17 +1199,18 @@ describe('retry from blocked', () => {
     await runner.poll();
 
     const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
-    assert.equal(resumedOc, undefined, 'should not retry when issue is in-flight');
+    assert.equal(resumedOc, undefined, 'should not recover when issue is in-flight');
 
     resolveExecutor?.({ type: 'success' });
     await runner.waitForInFlight();
   });
 
-  it('does not retry when run already has a pendingAct', async () => {
+  it('does not recover when run already has a pendingAct', async () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: { id: 'act-1', name: ACTS.IMPLEMENT, opts: {} },
       latestOutcome: OUTCOMES.BUILDING,
+      outcomes: [oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD }])],
     })];
     m.board.scanBlocked = async () => new Set();
 
@@ -1135,75 +1219,38 @@ describe('retry from blocked', () => {
     await runner.waitForInFlight();
 
     const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
-    assert.equal(resumedOc, undefined, 'should not retry when pendingAct exists');
+    assert.equal(resumedOc, undefined, 'should not recover when pendingAct exists');
   });
 
-  it('does not retry when latestOutcome is not a terminal failure', async () => {
-    const m = createMocks();
-    m.warp.findOpenIssueRuns = async () => [makeRun({
-      pendingAct: null,
-      latestOutcome: OUTCOMES.PR_CREATED,
-      groups: new Map([['Build', 'build-group-1']]),
-    })];
-    m.board.scanBlocked = async () => new Set();
-
-    const runner = createRunner({ ...m, log: m.log });
-    await runner.poll();
-    await runner.waitForInFlight();
-
-    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
-    assert.equal(resumedOc, undefined, 'should not retry non-terminal outcomes');
-  });
-
-  it('deduplicates retries by issueId (multiple open runs for same issue)', async () => {
-    const m = createMocks();
-    m.warp.findOpenIssueRuns = async () => [
-      makeRun({
-        id: 'run-old', pendingAct: null,
-        latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
-        groups: new Map([['Build', 'grp-old']]),
-      }),
-      makeRun({
-        id: 'run-new', pendingAct: null,
-        latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
-        groups: new Map([['Build', 'grp-new']]),
-      }),
-    ];
-    m.board.scanBlocked = async () => new Set();
-
-    const runner = createRunner({ ...m, log: m.log });
-    await runner.poll();
-    await runner.waitForInFlight();
-
-    const resumed = m.calls.filter(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
-    assert.equal(resumed.length, 1, 'should only retry once per issueId');
-  });
-
-  it('syncs board to inProgress on retry (Build phase)', async () => {
+  it('does not recover when no checkpoint found in outcomes', async () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
       latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
-      groups: new Map([['Build', 'build-group-1']]),
+      outcomes: [
+        // No checkpoint outcomes — just failure
+        oc(OUTCOMES.IMPLEMENTATION_FAILED),
+      ],
     })];
     m.board.scanBlocked = async () => new Set();
 
     const runner = createRunner({ ...m, log: m.log });
     await runner.poll();
     await runner.waitForInFlight();
-    await new Promise(r => setTimeout(r, 0));
 
-    const sync = m.calls.find(c => c.name === 'syncState');
-    assert.ok(sync, 'should sync board on retry');
-    assert.equal(sync.args[1], 'inProgress');
+    const resumedOc = m.calls.find(c => c.name === 'batchOutcome' && c.args[1].name === OUTCOMES.RESUMED);
+    assert.equal(resumedOc, undefined, 'should not recover when no checkpoint found');
   });
 
-  it('syncs board to inReview on retry (Review phase)', async () => {
+  it('syncs board to inProgress on recovery', async () => {
     const m = createMocks();
     m.warp.findOpenIssueRuns = async () => [makeRun({
       pendingAct: null,
-      latestOutcome: OUTCOMES.REVIEW_FAILED,
-      groups: new Map([['Review', 'review-group-1']]),
+      latestOutcome: OUTCOMES.IMPLEMENTATION_FAILED,
+      outcomes: [
+        oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: { repo: 'r', issue: '42', title: 'T' } }]),
+        oc(OUTCOMES.IMPLEMENTATION_FAILED),
+      ],
     })];
     m.board.scanBlocked = async () => new Set();
 
@@ -1213,118 +1260,81 @@ describe('retry from blocked', () => {
     await new Promise(r => setTimeout(r, 0));
 
     const sync = m.calls.find(c => c.name === 'syncState');
-    assert.ok(sync, 'should sync board on retry');
-    assert.equal(sync.args[1], 'inReview');
+    assert.ok(sync, 'should sync board on recovery');
+    assert.equal(sync.args[1], 'inProgress');
   });
 });
 
 // ---------------------------------------------------------------------------
-// Implement short-circuit tests
+// findRecoveryTarget unit tests
 // ---------------------------------------------------------------------------
 
-describe('implement short-circuit when PRs exist', () => {
-  it('returns success without calling Claude when PRs already exist', async () => {
-    let claudeCalled = false;
-    const logs = [];
-    const item = { _issueId: 42, content: { title: 'Test issue', body: '' } };
-    const ctx = {
-      config: {
-        repos: [{ url: 'https://github.com/owner/repo' }],
-        warpmetricsApiKey: null,
-      },
-      clients: {
-        git: {},
-        prs: {
-          findAllPRs: (issueId, repoNames, opts) => [
-            { repo: 'owner/repo', prNumber: 7 },
-          ],
-        },
-        issues: {},
-        claudeCode: {
-          run: async () => { claudeCalled = true; return { result: '', costUsd: 0, trace: null, sessionId: null }; },
-        },
-        log: (msg) => logs.push(msg),
-      },
-      context: { onStep: null, onBeforeLog: null },
-      resumeSession: undefined,
-    };
+describe('findRecoveryTarget', () => {
+  function oc(name, acts = []) {
+    return { name, acts: acts.map(a => ({ name: a.name, opts: a.opts || {} })) };
+  }
 
-    const result = await implement(item, ctx);
-
-    assert.equal(result.type, 'success');
-    assert.equal(result.costUsd, 0);
-    assert.deepEqual(result.prs, [{ repo: 'owner/repo', prNumber: 7 }]);
-    assert.equal(result.deployPlan, null);
-    assert.equal(result.sessionId, null);
-    assert.equal(claudeCalled, false, 'should not call Claude');
-    assert.ok(logs.some(l => l.includes('existing PR(s)') && l.includes('owner/repo#7')), 'should log existing PRs');
+  it('finds PR Created checkpoint with Review act opts', () => {
+    const opts = { prs: [{ repo: 'r', prNumber: 1 }], release: [], sessionId: 's1' };
+    const outcomes = [
+      oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: { repo: 'r', issue: '42', title: 'T' } }]),
+      oc(OUTCOMES.BUILDING),
+      oc(OUTCOMES.PR_CREATED, [{ name: ACTS.REVIEW, opts }]),
+      oc(OUTCOMES.REVIEWING),
+      oc(OUTCOMES.REVIEW_FAILED),
+    ];
+    const target = findRecoveryTarget(outcomes, CHECKPOINTS);
+    assert.ok(target);
+    assert.equal(target.phase, ACTS.REVIEW);
+    assert.deepEqual(target.opts, opts);
   });
 
-  it('does not short-circuit when resumeSession is set', async () => {
-    let findAllPRsCalled = false;
-    const item = { _issueId: 42, content: { title: 'Test issue', body: '' } };
-    const ctx = {
-      config: {
-        repos: [{ url: 'https://github.com/owner/repo' }],
-        warpmetricsApiKey: null,
-        memory: { enabled: false },
-      },
-      clients: {
-        git: {
-          clone: () => {},
-          createBranch: () => {},
-          status: () => false,
-          getCurrentBranch: () => 'agent/issue-42',
-          hasNewCommits: () => false,
-        },
-        prs: {
-          findAllPRs: () => { findAllPRsCalled = true; return [{ repo: 'owner/repo', prNumber: 7 }]; },
-        },
-        issues: { getComments: () => [] },
-        claudeCode: {
-          run: async () => ({ result: '', costUsd: 0, trace: null, sessionId: 's1', hitMaxTurns: false }),
-        },
-        log: () => {},
-      },
-      context: { onStep: null, onBeforeLog: null },
-      resumeSession: 'existing-session-id',
-    };
-
-    try { await implement(item, ctx); } catch {}
-    assert.equal(findAllPRsCalled, false, 'should not call findAllPRs when resumeSession is set');
+  it('finds Started checkpoint when only Build phase exists', () => {
+    const buildOpts = { repo: 'r', issue: '42', title: 'T' };
+    const outcomes = [
+      oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: buildOpts }]),
+      oc(OUTCOMES.BUILDING),
+    ];
+    const target = findRecoveryTarget(outcomes, CHECKPOINTS);
+    assert.ok(target);
+    assert.equal(target.phase, ACTS.BUILD);
+    assert.deepEqual(target.opts, buildOpts);
   });
 
-  it('does not short-circuit when no PRs exist', async () => {
-    let claudeCalled = false;
-    const item = { _issueId: 42, content: { title: 'Test issue', body: '' } };
-    const ctx = {
-      config: {
-        repos: [{ url: 'https://github.com/owner/repo' }],
-        warpmetricsApiKey: null,
-        memory: { enabled: false },
-      },
-      clients: {
-        git: {
-          clone: () => {},
-          createBranch: () => {},
-          status: () => false,
-          getCurrentBranch: () => 'agent/issue-42',
-          hasNewCommits: () => false,
-        },
-        prs: {
-          findAllPRs: () => [],
-        },
-        issues: { getComments: () => [] },
-        claudeCode: {
-          run: async () => { claudeCalled = true; return { result: '', costUsd: 0, trace: null, sessionId: null, hitMaxTurns: false }; },
-        },
-        log: () => {},
-      },
-      context: { onStep: null, onBeforeLog: null },
-      resumeSession: undefined,
-    };
+  it('returns null when no checkpoint found', () => {
+    const outcomes = [
+      oc(OUTCOMES.BUILDING),
+      oc(OUTCOMES.IMPLEMENTATION_FAILED),
+    ];
+    const target = findRecoveryTarget(outcomes, CHECKPOINTS);
+    assert.equal(target, null);
+  });
 
-    try { await implement(item, ctx); } catch {}
-    assert.equal(claudeCalled, true, 'should call Claude when no existing PRs');
+  it('returns null for empty outcomes', () => {
+    assert.equal(findRecoveryTarget([], CHECKPOINTS), null);
+  });
+
+  it('picks last checkpoint (Merged over PR Created)', () => {
+    const deployOpts = { prs: [{ repo: 'r', prNumber: 1 }] };
+    const outcomes = [
+      oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD }]),
+      oc(OUTCOMES.PR_CREATED, [{ name: ACTS.REVIEW }]),
+      oc(OUTCOMES.MERGED, [{ name: ACTS.DEPLOY, opts: deployOpts }]),
+      oc(OUTCOMES.DEPLOY_FAILED),
+    ];
+    const target = findRecoveryTarget(outcomes, CHECKPOINTS);
+    assert.equal(target.phase, ACTS.DEPLOY);
+    assert.deepEqual(target.opts, deployOpts);
+  });
+
+  it('skips checkpoint with no acts', () => {
+    const buildOpts = { repo: 'r', issue: '42', title: 'T' };
+    const outcomes = [
+      oc(OUTCOMES.STARTED, [{ name: ACTS.BUILD, opts: buildOpts }]),
+      oc(OUTCOMES.PR_CREATED), // no acts — skip
+      oc(OUTCOMES.REVIEW_FAILED),
+    ];
+    const target = findRecoveryTarget(outcomes, CHECKPOINTS);
+    assert.equal(target.phase, ACTS.BUILD, 'should fall back to Started');
   });
 });

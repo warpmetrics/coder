@@ -37,7 +37,7 @@ export function create({ teamKey, apiKey, columns = {} }) {
     done: columns.done || 'Done',
     blocked: columns.blocked || 'Blocked',
     waiting: columns.waiting || 'Waiting for Input',
-    aborted: columns.aborted || 'Aborted',
+    cancelled: columns.cancelled || 'Cancelled',
   };
 
   let cachedIssues = [];
@@ -202,8 +202,9 @@ export function create({ teamKey, apiKey, columns = {} }) {
       return issuesByState(colNames.done);
     },
 
-    async listAborted() {
-      return issuesByState(colNames.aborted);
+    async listCancelled() {
+      return issuesByState(colNames.cancelled);
     },
+    moveToCancelled(item) { return moveItem(item, 'cancelled'); },
   };
 }

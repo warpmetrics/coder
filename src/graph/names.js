@@ -25,13 +25,14 @@ export const OUTCOMES = {
   RELEASED: 'Released',
   RELEASE_FAILED: 'Release Failed',
   REVIEW_FAILED: 'Review Failed',
-  ABORTED: 'Aborted',
+  CANCELLED: 'Cancelled',
   CHANGES_REQUESTED: 'Changes Requested',
   APPROVED: 'Approved',
   WAITING: 'Waiting',
   BUILDING: 'Building',
   REVIEWING: 'Reviewing',
   RELEASING: 'Releasing',
+  INTERRUPTED: 'Interrupted',
 };
 
 // Act names
@@ -79,11 +80,12 @@ export const CLASSIFICATIONS = [
   { name: OUTCOMES.RELEASED, classification: 'success' },
   { name: OUTCOMES.RELEASE_FAILED, classification: 'failure' },
   { name: OUTCOMES.REVIEW_FAILED, classification: 'failure' },
-  { name: OUTCOMES.ABORTED, classification: 'failure' },
+  { name: OUTCOMES.CANCELLED, classification: 'failure' },
   { name: OUTCOMES.CHANGES_REQUESTED, classification: 'neutral' },
   { name: OUTCOMES.APPROVED, classification: 'success' },
   { name: OUTCOMES.WAITING, classification: 'neutral' },
   { name: OUTCOMES.BUILDING, classification: 'neutral' },
   { name: OUTCOMES.REVIEWING, classification: 'neutral' },
   { name: OUTCOMES.RELEASING, classification: 'neutral' },
+  { name: OUTCOMES.INTERRUPTED, classification: 'failure' },
 ];

@@ -135,57 +135,6 @@ export async function countRevisions(apiKey, { prNumber, repo, since }) {
 }
 
 // ---------------------------------------------------------------------------
-// Release queries
-// ---------------------------------------------------------------------------
-
-export async function findShippedIssues(apiKey) {
-  const runs = await findRuns(apiKey, LABELS.ISSUE, { limit: 100 });
-  const shipped = [];
-
-  const releaseActs = await findActs(apiKey, ACTS.RELEASE);
-  const actsByOutcomeId = new Map();
-  for (const act of releaseActs) {
-    actsByOutcomeId.set(act.refId, act);
-  }
-
-  for (const run of runs) {
-    const data = await getRunState(apiKey, run.id);
-    if (!data) continue;
-
-    const outcomes = data.outcomes || [];
-    if (outcomes.length === 0) continue;
-
-    const lastOutcome = outcomes[outcomes.length - 1];
-    if (lastOutcome.name === OUTCOMES.MANUAL_RELEASE || lastOutcome.name === OUTCOMES.RELEASE_FAILED) {
-      const shippedOutcome = [...outcomes].reverse().find(o => o.name === OUTCOMES.MANUAL_RELEASE);
-      if (!shippedOutcome) continue;
-
-      const releaseAct = actsByOutcomeId.get(shippedOutcome.id);
-
-      shipped.push({
-        runId: run.id,
-        opts: run.opts,
-        shippedOutcome,
-        releaseActId: releaseAct?.id || null,
-      });
-    }
-  }
-
-  return shipped;
-}
-
-async function findActs(apiKey, name) {
-  const params = new URLSearchParams({ name, limit: '100' });
-  const res = await fetch(`${API_URL}/v1/acts?${params}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT),
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.data || [];
-}
-
-// ---------------------------------------------------------------------------
 // Outcome classifications
 // ---------------------------------------------------------------------------
 
@@ -260,9 +209,9 @@ export async function recordOutcome(apiKey, { runId }, { step, success, costUsd,
   return { id: outcomeId, name };
 }
 
-export async function traceClaudeCall(apiKey, entityId, { duration, startedAt, endedAt, cost, status, messages, response, turns, sessionId }) {
+export async function traceClaudeCall(apiKey, entityId, { duration, startedAt, endedAt, cost, status, error, messages, response, turns, sessionId }) {
   ensureSDK(apiKey);
-  sdkTrace(entityId, {
+  const event = {
     provider: 'anthropic',
     model: 'claude-code',
     duration,
@@ -273,7 +222,9 @@ export async function traceClaudeCall(apiKey, entityId, { duration, startedAt, e
     messages,
     response,
     opts: { turns, session_id: sessionId },
-  });
+  };
+  if (error) event.error = error;
+  sdkTrace(entityId, event);
   await sdkFlush();
 }
 
@@ -300,27 +251,8 @@ export async function closeIssueRun(apiKey, { runId, name, opts }) {
 export const TERMINAL_OUTCOMES = new Set([
   OUTCOMES.MANUAL_RELEASE,
   OUTCOMES.RELEASED,
-  OUTCOMES.ABORTED,
+  OUTCOMES.CANCELLED,
 ]);
-
-/**
- * Find the last act that was actually executed (has followUpRuns).
- * Walks groups newest-first, outcomes newest-first.
- * Returns { act, parentId, parentLabel } or null.
- */
-export function findLastExecutedAct(data) {
-  for (const group of (data.groups || []).slice().reverse()) {
-    for (let i = (group.outcomes || []).length - 1; i >= 0; i--) {
-      const oc = group.outcomes[i];
-      for (const act of (oc.acts || []).slice().reverse()) {
-        if (act.followUpRuns?.length > 0) {
-          return { act, parentId: group.id, parentLabel: group.label };
-        }
-      }
-    }
-  }
-  return null;
-}
 
 /**
  * Find a pending act on a run or its groups (phase groups).
@@ -352,7 +284,11 @@ export function findPendingAct(data) {
   return null;
 }
 
-export async function findOpenIssueRuns(apiKey) {
+function runTitle(run) {
+  return run.opts?.title || run.opts?.name || run.name || null;
+}
+
+export async function findOpenIssueRuns(apiKey, { onPartial } = {}) {
   const runs = await findRuns(apiKey, LABELS.ISSUE, { limit: 100 });
 
   // Pre-filter using list response (no extra API calls needed).
@@ -364,15 +300,37 @@ export async function findOpenIssueRuns(apiKey) {
     return true;
   });
 
-  // Only fetch full state for the few non-terminal runs.
+  // Dispatch partial data immediately so TUI can render before detail fetches.
+  if (onPartial && candidates.length > 0) {
+    const partial = candidates.map(run => {
+      const outcomes = run.outcomes || [];
+      const last = outcomes[outcomes.length - 1];
+      return {
+        id: run.id,
+        issueId: run.opts?.issue ? Number(run.opts.issue) : null,
+        repo: run.opts?.repo || null,
+        title: runTitle(run),
+        latestOutcome: last?.name || null,
+        latestOutcomeId: last?.id || null,
+        outcomes,
+        pendingAct: null,
+        parentEntityId: null,
+        parentEntityLabel: null,
+        groups: new Map(),
+      };
+    });
+    onPartial(partial);
+  }
+
+  // Fetch full state for all candidates in parallel.
+  const results = await Promise.allSettled(
+    candidates.map(run => getRunState(apiKey, run.id).then(data => ({ run, data })))
+  );
+
   const open = [];
-  for (const run of candidates) {
-    let data;
-    try {
-      data = await getRunState(apiKey, run.id);
-    } catch {
-      continue; // skip on network error instead of aborting all
-    }
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    const { run, data } = result.value;
     if (!data) continue;
 
     const outcomes = data.outcomes || [];
@@ -391,34 +349,27 @@ export async function findOpenIssueRuns(apiKey) {
       parentEntityLabel = pending.parentLabel;
     }
 
-    // Build groups map (label → groupId) from all known groups.
+    // Build groups map (label → groupId) and collect group outcomes.
     const groups = new Map();
+    const groupOutcomes = new Map();
     for (const g of (data.groups || [])) {
       if (g.label && g.id) groups.set(g.label, g.id);
-    }
-
-    // When no pending act, find the last executed act for retry-from-blocked.
-    let lastExecutedAct = null;
-    if (!pendingAct) {
-      const last = findLastExecutedAct(data);
-      if (last) {
-        lastExecutedAct = { name: last.act.name, opts: last.act.opts || {}, parentId: last.parentId, parentLabel: last.parentLabel };
-      }
+      if (g.label && g.outcomes?.length) groupOutcomes.set(g.label, g.outcomes);
     }
 
     open.push({
       id: run.id,
       issueId: run.opts?.issue ? Number(run.opts.issue) : null,
       repo: run.opts?.repo || null,
-      title: run.opts?.title || run.name || null,
+      title: runTitle(run),
       latestOutcome: lastOutcome?.name || null,
       latestOutcomeId: lastOutcome?.id || null,
       outcomes,
+      groupOutcomes,
       pendingAct,
       parentEntityId,
       parentEntityLabel,
       groups,
-      lastExecutedAct,
     });
   }
 
@@ -432,16 +383,3 @@ export async function recordIssueOutcome(apiKey, { runId, name, opts }) {
   return { outcomeId: oc?.id };
 }
 
-// ---------------------------------------------------------------------------
-// Release runs
-// ---------------------------------------------------------------------------
-
-export async function startReleaseRun(apiKey, { refActId, repos }) {
-  ensureSDK(apiKey);
-  const r = refActId
-    ? sdkRun(refActId, LABELS.RELEASE, { repos: repos.join(',') })
-    : sdkRun(LABELS.RELEASE, { repos: repos.join(',') });
-  await sdkFlush();
-
-  return { runId: r.id };
-}

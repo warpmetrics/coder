@@ -3,10 +3,13 @@
 export const TIMEOUTS = {
   CLAUDE: 60 * 60 * 1000,       // claude-code.js — max runtime for a Claude subprocess
   CLAUDE_QUICK: 120_000,        // quick single-turn Claude calls (classify, reflect, changelog)
+  REVIEW: 15 * 60 * 1000,       // review/index.js — max runtime for review Claude call
   HOOK: 5 * 60 * 1000,          // hooks.js — max runtime for a hook command
   DEPLOY: 10 * 60 * 1000,       // deploy/index.js — max runtime for a deploy step
   API_FETCH: 15_000,             // warp.js — timeout for API fetch calls
   SIGKILL_GRACE: 5000,           // claude-code.js — grace period before SIGKILL
+  GIT: 5 * 60 * 1000,           // git.js — max runtime for a git CLI call
+  GH: 30_000,                   // prs/github.js, notify/github.js — max runtime for a gh CLI call
 };
 
 export const LIMITS = {

@@ -81,75 +81,75 @@ describe('buildTrace', () => {
 
 describe('fetchComments', () => {
 
-  it('returns empty when no comments', () => {
+  it('returns empty when no comments', async () => {
     const issues = { getIssueComments: () => [] };
-    const result = fetchComments(issues, 42, 'owner/repo');
+    const result = await fetchComments(issues, 42, 'owner/repo');
     assert.equal(result.commentsText, '');
     assert.equal(result.lastHumanMessage, null);
   });
 
-  it('returns empty on error', () => {
+  it('returns empty on error', async () => {
     const issues = { getIssueComments: () => { throw new Error('API error'); } };
-    const result = fetchComments(issues, 42, 'owner/repo');
+    const result = await fetchComments(issues, 42, 'owner/repo');
     assert.equal(result.commentsText, '');
     assert.equal(result.lastHumanMessage, null);
   });
 
-  it('formats comments with user login', () => {
+  it('formats comments with user login', async () => {
     const issues = {
       getIssueComments: () => [
         { user: { login: 'alice' }, body: 'Looks good!' },
         { user: { login: 'bob' }, body: 'One concern.' },
       ],
     };
-    const result = fetchComments(issues, 42, 'owner/repo');
+    const result = await fetchComments(issues, 42, 'owner/repo');
     assert.ok(result.commentsText.includes('**alice:**'));
     assert.ok(result.commentsText.includes('Looks good!'));
     assert.ok(result.commentsText.includes('**bob:**'));
     assert.ok(result.commentsText.includes('One concern.'));
   });
 
-  it('finds last human message (not warp-coder)', () => {
+  it('finds last human message (not warp-coder)', async () => {
     const issues = {
       getIssueComments: () => [
         { user: { login: 'alice' }, body: 'Please fix the build' },
         { user: { login: 'warp-coder-bot' }, body: 'Done — warp-coder processed' },
       ],
     };
-    const result = fetchComments(issues, 42, 'owner/repo');
+    const result = await fetchComments(issues, 42, 'owner/repo');
     assert.equal(result.lastHumanMessage, 'Please fix the build');
   });
 
-  it('strips HTML comments from bodies', () => {
+  it('strips HTML comments from bodies', async () => {
     const issues = {
       getIssueComments: () => [
         { user: { login: 'alice' }, body: '<!-- hidden comment -->\nVisible text' },
       ],
     };
-    const result = fetchComments(issues, 42, 'owner/repo');
+    const result = await fetchComments(issues, 42, 'owner/repo');
     assert.ok(result.commentsText.includes('Visible text'));
     assert.ok(!result.commentsText.includes('hidden comment'));
   });
 
-  it('handles comments with empty body', () => {
+  it('handles comments with empty body', async () => {
     const issues = {
       getIssueComments: () => [
         { user: { login: 'alice' }, body: '' },
         { user: { login: 'bob' }, body: 'Real comment' },
       ],
     };
-    const result = fetchComments(issues, 42, 'owner/repo');
+    const result = await fetchComments(issues, 42, 'owner/repo');
     assert.ok(!result.commentsText.includes('**alice:**'));
     assert.ok(result.commentsText.includes('**bob:**'));
   });
 
-  it('handles comments with null user', () => {
+  it('handles comments with null user', async () => {
     const issues = {
       getIssueComments: () => [
         { user: null, body: 'Anonymous comment' },
       ],
     };
-    const result = fetchComments(issues, 42, 'owner/repo');
+    const result = await fetchComments(issues, 42, 'owner/repo');
     assert.ok(result.commentsText.includes('**unknown:**'));
   });
 });

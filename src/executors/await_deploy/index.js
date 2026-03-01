@@ -12,7 +12,10 @@ export async function awaitDeploy(run, ctx) {
   const { config, clients: { log }, context: { actOpts } } = ctx;
   const deployColName = config.board?.columns?.deploy || 'Deploy';
   const currentCol = run.boardItem?.status || run.boardItem?._stateName;
-  const fwd = { prs: actOpts?.prs, release: actOpts?.release };
+  const fwd = {
+    prs: actOpts?.prs, release: actOpts?.release, sessionId: actOpts?.sessionId,
+    deployAttempts: actOpts?.deployAttempts, completedRepos: actOpts?.completedRepos,
+  };
 
   if (currentCol !== deployColName) {
     return { type: 'waiting', costUsd: null, trace: null, outcomeOpts: {}, nextActOpts: fwd };

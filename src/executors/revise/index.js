@@ -19,25 +19,25 @@ import { gitExclude } from '../../agent/workspace.js';
 // Small helpers
 // ---------------------------------------------------------------------------
 
-function pushRevisionChanges(git, repoDirs, headsBefore, log) {
+async function pushRevisionChanges(git, repoDirs, headsBefore, log) {
   let any = false;
   for (const rd of repoDirs) {
     if (!rd.hasPR) continue;
     gitExclude(rd.dir, ['.warp-coder-ask']);
-    if (git.status(rd.dir)) git.commitAll(rd.dir, 'Address review feedback');
-    if (git.getHead(rd.dir) === headsBefore.get(rd.dir)) { log(`  ${rd.dirName}: no changes`); continue; }
+    if (await git.status(rd.dir)) await git.commitAll(rd.dir, 'Address review feedback');
+    if (await git.getHead(rd.dir) === headsBefore.get(rd.dir)) { log(`  ${rd.dirName}: no changes`); continue; }
     any = true;
     log(`  ${rd.dirName}: pushing`);
-    git.push(rd.dir, rd.branch);
+    await git.push(rd.dir, rd.branch);
   }
   return any;
 }
 
-function fetchReviews(prsClient, prList, log) {
+async function fetchReviews(prsClient, prList, log) {
   const reviews = [], inline = [];
   for (const { repo, prNumber } of prList) {
-    try { reviews.push(...prsClient.getReviews(prNumber, { repo }).map(r => ({ ...r, _repo: repo, _prNumber: prNumber }))); } catch (err) { log(`  warning: getReviews failed for ${repo}#${prNumber}: ${err.message}`); }
-    try { inline.push(...prsClient.getReviewComments(prNumber, { repo }).map(c => ({ ...c, _repo: repo, _prNumber: prNumber }))); } catch (err) { log(`  warning: getReviewComments failed for ${repo}#${prNumber}: ${err.message}`); }
+    try { reviews.push(...(await prsClient.getReviews(prNumber, { repo })).map(r => ({ ...r, _repo: repo, _prNumber: prNumber }))); } catch (err) { log(`  warning: getReviews failed for ${repo}#${prNumber}: ${err.message}`); }
+    try { inline.push(...(await prsClient.getReviewComments(prNumber, { repo })).map(c => ({ ...c, _repo: repo, _prNumber: prNumber }))); } catch (err) { log(`  warning: getReviewComments failed for ${repo}#${prNumber}: ${err.message}`); }
   }
 
   const multi = prList.length > 1;
@@ -56,23 +56,23 @@ function fetchReviews(prsClient, prList, log) {
   return { reviewSection: s, reviewComments: reviews };
 }
 
-function updatePRActIds(prsClient, repoDirs, prActId, log) {
+async function updatePRActIds(prsClient, repoDirs, prActId, log) {
   for (const rd of repoDirs) {
     if (!rd.hasPR) continue;
     try {
-      let body = prsClient.getPRBody(rd.prNumber, { repo: rd.name });
+      let body = await prsClient.getPRBody(rd.prNumber, { repo: rd.name });
       body = body.replace(/<!-- wm:act:wm_act_\w+ -->/, `<!-- wm:act:${prActId} -->`);
       if (!body.includes(`<!-- wm:act:${prActId} -->`)) body += `\n\n<!-- wm:act:${prActId} -->`;
-      prsClient.updatePRBody(rd.prNumber, { repo: rd.name, body });
+      await prsClient.updatePRBody(rd.prNumber, { repo: rd.name, body });
     } catch (err) { log(`  warning: updatePRBody failed for ${rd.name}#${rd.prNumber}: ${err.message}`); }
   }
 }
 
-function dismissStaleReviews(prsClient, prList, log) {
+async function dismissStaleReviews(prsClient, prList, log) {
   for (const { repo, prNumber } of prList) {
     try {
-      for (const r of prsClient.getReviews(prNumber, { repo }))
-        if (r.state === 'CHANGES_REQUESTED') { prsClient.dismissReview(prNumber, r.id, { repo, message: 'Code verified — no changes needed.' }); log(`  dismissed review ${r.id}`); }
+      for (const r of await prsClient.getReviews(prNumber, { repo }))
+        if (r.state === 'CHANGES_REQUESTED') { await prsClient.dismissReview(prNumber, r.id, { repo, message: 'Code verified — no changes needed.' }); log(`  dismissed review ${r.id}`); }
     } catch (err) { log(`  warning: dismissStaleReviews failed for ${repo}#${prNumber}: ${err.message}`); }
   }
 }
@@ -88,14 +88,14 @@ export const definition = {
     async error(run, result, ctx) {
       const { config, clients: { notify } } = ctx;
       const error = result.error || 'Unknown error';
-      notify.comment(run.issueId, {
+      await notify.comment(run.issueId, {
         repo: config.repoNames[0], runId: run.id, title: run.title,
         body: `<!-- warp-coder:error\n${error}\n-->\n\nRevision failed — needs human intervention.\n\n<details>\n<summary>Error details</summary>\n\n\`\`\`\n${error}\n\`\`\`\n</details>`,
       });
     },
     async max_retries(run, result, ctx) {
       const { config, clients: { notify } } = ctx;
-      notify.comment(run.issueId, {
+      await notify.comment(run.issueId, {
         repo: config.repoNames[0], runId: run.id, title: run.title,
         body: `<!-- warp-coder:error\nMax retries (${result.count})\n-->\n\nHit revision limit (${result.count} attempts) — needs human help.`,
       });
@@ -111,10 +111,10 @@ export const definition = {
 
       if (r.type === 'success') {
         return { ...r, outcomeOpts: { prNumber: item._prNumber },
-          nextActOpts: { prs, release: context.actOpts?.release } };
+          nextActOpts: { prs, release: context.actOpts?.release, sessionId: context.actOpts?.sessionId } };
       }
       return { ...r, outcomeOpts: { prNumber: item._prNumber },
-        nextActOpts: { prs, release: context.actOpts?.release } };
+        nextActOpts: { prs, release: context.actOpts?.release, sessionId: context.actOpts?.sessionId } };
     };
   },
 };
@@ -146,7 +146,8 @@ export async function revise(item, ctx) {
 
     onStep?.('cloning');
     const dirNames = deriveRepoDirNames(repos);
-    const prLookup = new Map(prList.map(p => [p.repo, { prNumber: p.prNumber, branch: prs.getPRBranch(p.prNumber, { repo: p.repo }) }]));
+    const prLookupEntries = await Promise.all(prList.map(async p => [p.repo, { prNumber: p.prNumber, branch: await prs.getPRBranch(p.prNumber, { repo: p.repo }) }]));
+    const prLookup = new Map(prLookupEntries);
     const repoDirs = [], contextRepos = [], headsBefore = new Map();
 
     const workdirExists = existsSync(workdir);
@@ -157,16 +158,16 @@ export async function revise(item, ctx) {
       if (pr) {
         if (workdirExists && existsSync(join(dest, '.git'))) {
           // Reuse existing workdir — pull latest changes
-          git.setBotIdentity(dest);
+          await git.setBotIdentity(dest);
           repoDirs.push({ url, name, dirName, dir: dest, prNumber: pr.prNumber, branch: pr.branch, hasPR: true });
-          headsBefore.set(dest, git.getHead(dest));
+          headsBefore.set(dest, await git.getHead(dest));
           log(`  reusing ${name} (branch: ${pr.branch})`);
         } else {
           // Fallback: clone fresh
           mkdirSync(workdir, { recursive: true });
-          git.clone(url, dest, { branch: pr.branch });
+          await git.clone(url, dest, { branch: pr.branch });
           repoDirs.push({ url, name, dirName, dir: dest, prNumber: pr.prNumber, branch: pr.branch, hasPR: true });
-          headsBefore.set(dest, git.getHead(dest));
+          headsBefore.set(dest, await git.getHead(dest));
           log(`  cloned ${name} (branch: ${pr.branch})`);
         }
       } else {
@@ -177,12 +178,12 @@ export async function revise(item, ctx) {
     // 2. Skills + reviews + prompt
     const skillCount = installSkills(configDir, workdir);
     if (skillCount) log(`  installed ${skillCount} skill(s)`);
-    const { reviewSection, reviewComments } = fetchReviews(prs, prList, log);
+    const { reviewSection, reviewComments } = await fetchReviews(prs, prList, log);
     const memory = config.memory?.enabled !== false ? loadMemory(configDir) : '';
     const prompt = buildRevisePrompt({ repoDirs, contextRepos, memory, reviewSection });
 
     // 3. Claude
-    onStep?.('claude');
+    onStep?.('revising');
     const result = await claudeCode.run({
       prompt, workdir,
       resume: resumeSession, logPrefix: `[#${issueId}] [revise]`, onBeforeLog,
@@ -193,22 +194,23 @@ export async function revise(item, ctx) {
     // 4. Push
     onStep?.('pushing');
     safeHook('onBeforePush', config, { workdir, prNumber: primaryPRNumber, branch: repoDirs.find(r => r.hasPR)?.branch, repo: primaryRepo }, hookOutputs);
-    const anyChanges = pushRevisionChanges(git, repoDirs, headsBefore, log);
-    if (prActReserved) updatePRActIds(prs, repoDirs, prActReserved.id, log);
+    const anyChanges = await pushRevisionChanges(git, repoDirs, headsBefore, log);
+    if (prActReserved) await updatePRActIds(prs, repoDirs, prActReserved.id, log);
 
     if (!anyChanges) {
       log('  no changes needed — dismissing stale reviews');
-      dismissStaleReviews(prs, prList, log);
+      await dismissStaleReviews(prs, prList, log);
       for (const rd of repoDirs) {
         if (!rd.hasPR) continue;
-        git.commitAll(rd.dir, 'Verified correct — review feedback already addressed', { allowEmpty: true });
-        git.push(rd.dir, rd.branch);
+        await git.commitAll(rd.dir, 'Verified correct — review feedback already addressed', { allowEmpty: true });
+        await git.push(rd.dir, rd.branch);
       }
     }
 
     reflectOnStep(config, configDir, 'revise', { prNumber: primaryPRNumber, success: true, hookOutputs, reviewComments, claudeOutput: result.result }, log, claudeCode);
     return { type: 'success', costUsd: result.costUsd, trace: result.trace };
   } catch (err) {
+    try { rmSync(workdir, { recursive: true, force: true }); } catch {}
     reflectOnStep(config, configDir, 'revise', { prNumber: primaryPRNumber, success: false, error: err.message, hookOutputs }, log, claudeCode);
     return { type: 'error', error: err.message, costUsd: null, trace: null };
   }

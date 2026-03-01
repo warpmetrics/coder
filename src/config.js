@@ -5,6 +5,10 @@ export const CONFIG_DIR = '.warp-coder';
 const CONFIG_FILE = 'config.json';
 const ENV_FILE = '.env';
 
+export function issueBranch(issueId) {
+  return typeof issueId === 'number' ? `agent/issue-${issueId}` : `agent/${issueId}`;
+}
+
 export function repoName(urlOrRepo) {
   const url = typeof urlOrRepo === 'object' ? urlOrRepo.url : urlOrRepo;
   return url.replace(/\.git$/, '').replace(/^.*github\.com[:\/]/, '');

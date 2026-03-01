@@ -90,8 +90,6 @@ When multiple issues touch the same repos, deploys are batched and ordered by de
 ```
 warp-coder init                Set up config for a project
 warp-coder watch               Start the poll loop
-warp-coder release             Release shipped issues (packages + deploys)
-warp-coder release --preview   Preview changelog entries without releasing
 warp-coder debug [issue#]      Interactive state machine testing
 warp-coder verify              Verify state machine graph consistency
 warp-coder memory              Print current memory file
@@ -123,7 +121,8 @@ The board state maps directly to the pipeline. Each outcome moves the card:
 | Ready for Deploy | Merged, Awaiting Deploy |
 | Deploy | Deploy Approved, Deployed, Releasing |
 | Done | Released, Manual Release |
-| Blocked | Implementation Failed, Revision Failed, Max Retries, Merge Failed, Review Failed, Deploy Failed, Release Failed, Aborted |
+| Blocked | Implementation Failed, Revision Failed, Max Retries, Merge Failed, Review Failed, Deploy Failed, Release Failed |
+| Cancelled | Cancelled |
 
 ## Project Structure
 
@@ -134,7 +133,7 @@ src/
   graph/              State machine compiler, validator, names, constants
   agent/              Workspace setup, hooks, memory, reflection
   clients/            GitHub, WarpMetrics, notifications, git
-  commands/           watch, debug, release
+  commands/           watch, debug, reset
   executors/          implement, review, revise, merge, deploy, release, await_*
   workflows/          Executor registry, builtins
   runner.js           Core poll loop and act processing

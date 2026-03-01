@@ -2,14 +2,11 @@
 // When a GitHub token is provided, rewrites URLs to HTTPS with token auth
 // and configures commits as the bot identity.
 
-import { execFileSync } from 'child_process';
+import { execAsync } from './exec.js';
+import { TIMEOUTS } from '../defaults.js';
 
 const BOT_NAME = 'warpmetrics[bot]';
 const BOT_EMAIL = 'bot@warpmetrics.com';
-
-function run(args, opts = {}) {
-  return execFileSync('git', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], ...opts }).trim();
-}
 
 /**
  * Rewrite any GitHub URL to HTTPS with embedded token.
@@ -24,45 +21,58 @@ export function tokenUrl(url, token) {
 
 export function createGitClient({ token } = {}) {
 
-  function setBotIdentity(dir) {
+  async function run(args, opts = {}) {
+    try {
+      const out = await execAsync('git', args, { timeout: TIMEOUTS.GIT, ...opts });
+      return out.trim();
+    } catch (err) {
+      if (token) {
+        if (err.message) err.message = err.message.replaceAll(token, '***');
+        if (err.stderr) err.stderr = err.stderr.toString().replaceAll(token, '***');
+      }
+      throw err;
+    }
+  }
+
+  async function setBotIdentity(dir) {
     if (!token) return;
-    run(['-C', dir, 'config', 'user.name', BOT_NAME]);
-    run(['-C', dir, 'config', 'user.email', BOT_EMAIL]);
+    await run(['-C', dir, 'config', 'user.name', BOT_NAME]);
+    await run(['-C', dir, 'config', 'user.email', BOT_EMAIL]);
   }
 
-  function clone(repoUrl, dest, { branch } = {}) {
-    run(['clone', ...(branch ? ['--branch', branch] : []), tokenUrl(repoUrl, token), dest]);
-    setBotIdentity(dest);
+  async function clone(repoUrl, dest, { branch } = {}) {
+    await run(['clone', ...(branch ? ['--branch', branch] : []), tokenUrl(repoUrl, token), dest]);
+    await setBotIdentity(dest);
   }
 
-  function createBranch(dir, name) {
-    run(['checkout', '-b', name], { cwd: dir });
+  async function createBranch(dir, name) {
+    await run(['checkout', '-b', name], { cwd: dir });
   }
 
-  function getHead(dir) {
+  async function getHead(dir) {
     return run(['rev-parse', 'HEAD'], { cwd: dir });
   }
 
-  function hasNewCommits(dir) {
-    const count = run(['rev-list', '--count', 'HEAD', '--not', '--remotes'], { cwd: dir });
+  async function hasNewCommits(dir) {
+    const count = await run(['rev-list', '--count', 'HEAD', '--not', '--remotes'], { cwd: dir });
     return parseInt(count, 10) > 0;
   }
 
-  function status(dir) {
+  async function status(dir) {
     return run(['status', '--short'], { cwd: dir });
   }
 
-  function commitAll(dir, message, { allowEmpty = false } = {}) {
-    run(['add', '-A'], { cwd: dir });
-    run(['commit', ...(allowEmpty ? ['--allow-empty'] : []), '-m', message], { cwd: dir });
+  async function commitAll(dir, message, { allowEmpty = false } = {}) {
+    await run(['add', '-A'], { cwd: dir });
+    await run(['commit', ...(allowEmpty ? ['--allow-empty'] : []), '-m', message], { cwd: dir });
   }
 
-  function push(dir, branch) {
-    run(['fetch', 'origin'], { cwd: dir });
-    run(['push', '-u', '--force-with-lease', 'origin', branch], { cwd: dir });
+  async function push(dir, branch) {
+    await run(['fetch', 'origin'], { cwd: dir });
+    await run(['push', '-u', '--force-with-lease', 'origin', branch], { cwd: dir });
   }
 
-  function getCurrentBranch(dir) {
+  async function getCurrentBranch(dir) {
     return run(['branch', '--show-current'], { cwd: dir });
   }
 

@@ -4,6 +4,7 @@ import { compileGraph } from './compile.js';
 
 export { compileGraph };
 export { validateGraph, buildTransitionGraph, findReachableActs, findOrphanOutcomes } from './validate.js';
+export { resolveEdges, availableTriggers, executeTrigger } from './ops.js';
 
 export function normalizeOutcomes(outcomes) {
   return Array.isArray(outcomes) ? outcomes : [outcomes];

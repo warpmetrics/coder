@@ -53,7 +53,12 @@ export function rawRun({ prompt, workdir, tools, allowedTools, disallowedTools, 
     const timer = timeout ? setTimeout(() => {
       proc.kill('SIGTERM');
       setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, TIMEOUTS.SIGKILL_GRACE);
-      settle(() => reject(new Error(`Claude timed out after ${Math.round(timeout / 1000)}s`)));
+      settle(() => {
+        const parts = [`Claude timed out after ${Math.round(timeout / 1000)}s`];
+        if (lastAssistantText) parts.push(`last output: ${lastAssistantText.slice(0, 200)}`);
+        if (stderr.trim()) parts.push(`stderr: ${stderr.trim().slice(-300)}`);
+        reject(new Error(parts.join(' | ')));
+      });
     }, timeout) : null;
 
     function flushTools() {
@@ -104,7 +109,10 @@ export function rawRun({ prompt, workdir, tools, allowedTools, disallowedTools, 
       if (verbose) flushTools();
       settle(() => {
         if (code !== 0) {
-          return reject(new Error(`claude exited with code ${code}: ${stderr}`));
+          const parts = [`claude exited with code ${code}`];
+          if (stderr.trim()) parts.push(stderr.trim().slice(-500));
+          else if (lastAssistantText) parts.push(`last output: ${lastAssistantText.slice(0, 200)}`);
+          return reject(new Error(parts.join(': ')));
         }
         resolve({
           result: resultEvent?.result ?? lastAssistantText,
@@ -144,9 +152,9 @@ export function buildTrace(result, startTime, { prompt } = {}) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-export function fetchComments(issues, issueId, repo, log) {
+export async function fetchComments(issues, issueId, repo, log) {
   try {
-    const comments = issues.getIssueComments(issueId, { repo });
+    const comments = await issues.getIssueComments(issueId, { repo });
     if (!comments.length) return { commentsText: '', lastHumanMessage: null };
     const lastHuman = [...comments].reverse().find(c => !(c.body || '').includes('warp-coder'));
     const strip = s => (s || '').replace(/<!--[\s\S]*?-->\n*/g, '').trim();
